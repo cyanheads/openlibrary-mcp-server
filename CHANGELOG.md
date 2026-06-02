@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-02
+
+mcp-ts-core ^0.9.16 → ^0.9.21 — per-request log context fix, secret scrubbing in fetchWithTimeout, withRetry fail-fast on non-retryable errors; new scripts and skills synced
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-05-30
 
 Enrichment adoption on search tools — query echo, result totals, and empty-result guidance now surface in a typed enrichment block; removed dead no_results error contract from search_books and search_authors

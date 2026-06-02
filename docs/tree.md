@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 09:11:28
+Generated on: 2026-06-02 14:44:33
 
 ```text
 openlibrary-mcp-server/
@@ -28,12 +28,14 @@ openlibrary-mcp-server/
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -60,6 +62,8 @@ openlibrary-mcp-server/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -88,6 +92,13 @@ openlibrary-mcp-server/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -138,16 +149,28 @@ openlibrary-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   │   ├── openlibrary-author.resource.test.ts
+│   │   ├── openlibrary-resources-edge.test.ts
 │   │   └── openlibrary-work.resource.test.ts
+│   ├── security/
+│   │   └── security.test.ts
 │   └── tools/
+│       ├── openlibrary-get-author-edge.tool.test.ts
+│       ├── openlibrary-get-author-works-edge.tool.test.ts
 │       ├── openlibrary-get-author-works.tool.test.ts
 │       ├── openlibrary-get-author.tool.test.ts
+│       ├── openlibrary-get-cover-url-edge.tool.test.ts
 │       ├── openlibrary-get-cover-url.tool.test.ts
+│       ├── openlibrary-get-edition-edge.tool.test.ts
 │       ├── openlibrary-get-edition.tool.test.ts
+│       ├── openlibrary-get-editions-edge.tool.test.ts
 │       ├── openlibrary-get-editions.tool.test.ts
+│       ├── openlibrary-get-subject-edge.tool.test.ts
 │       ├── openlibrary-get-subject.tool.test.ts
+│       ├── openlibrary-get-work-edge.tool.test.ts
 │       ├── openlibrary-get-work.tool.test.ts
+│       ├── openlibrary-search-authors-edge.tool.test.ts
 │       ├── openlibrary-search-authors.tool.test.ts
+│       ├── openlibrary-search-books-edge.tool.test.ts
 │       └── openlibrary-search-books.tool.test.ts
 ├── .dockerignore
 ├── .env.example

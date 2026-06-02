@@ -1,8 +1,8 @@
 # Developer Protocol
 
 **Server:** openlibrary-mcp-server
-**Version:** 0.1.10
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
+**Version:** 0.1.11
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -264,6 +264,7 @@ Available skills:
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
+| `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
 | `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
 | `release-and-publish` | Push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
@@ -278,6 +279,7 @@ Available skills:
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
+| `api-mirror` | MirrorService API — persistent self-refreshing SQLite mirror of a bulk upstream dataset |
 | `api-workers` | Cloudflare Workers runtime |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
@@ -301,6 +303,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm test` | Run tests |
 | `npm run start:stdio` | Production mode (stdio) |
 | `npm run start:http` | Production mode (HTTP) |
+| `npm run release:github` | Create GitHub Release from the current tag (title + notes-from-tag) |
 | `npm run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `npm run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `npm run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |

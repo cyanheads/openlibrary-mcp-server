@@ -175,7 +175,7 @@ export class OpenLibraryService {
 
   // ─── Works ────────────────────────────────────────────────────────────────────
 
-  async getWork(workId: string, ctx: Context): Promise<WorkDetail> {
+  async getWork(workId: string, ctx: Context): Promise<WorkDetail | null> {
     const id = stripPrefix(workId, '/works/');
     const url = `${BASE_URL}/works/${id}.json`;
     ctx.log.debug('Fetching work', { workId: id });
@@ -194,7 +194,7 @@ export class OpenLibraryService {
       last_modified?: { value: string };
     }>(url, ctx);
 
-    if (!raw.key) throw notFound(`Work ${id} not found on Open Library.`);
+    if (!raw.key) return null;
 
     const desc = extractDescription(raw.description);
     return {
@@ -219,7 +219,7 @@ export class OpenLibraryService {
     limit: number,
     offset: number,
     ctx: Context,
-  ): Promise<{ total: number; work_id: string; editions: EditionSummary[] }> {
+  ): Promise<{ total: number; work_id: string; editions: EditionSummary[] } | null> {
     const id = stripPrefix(workId, '/works/');
     const url = `${BASE_URL}/works/${id}/editions.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching editions', { workId: id, limit, offset });
@@ -240,7 +240,7 @@ export class OpenLibraryService {
       }>;
     }>(url, ctx);
 
-    if (!raw.entries) throw notFound(`Work ${id} not found on Open Library.`);
+    if (!raw.entries) return null;
 
     const editions: EditionSummary[] = raw.entries.map((e) => ({
       edition_id: stripPrefix(e.key ?? '', '/books/'),
@@ -437,7 +437,7 @@ export class OpenLibraryService {
     };
   }
 
-  async getAuthor(authorId: string, ctx: Context): Promise<AuthorDetail> {
+  async getAuthor(authorId: string, ctx: Context): Promise<AuthorDetail | null> {
     const id = stripPrefix(authorId, '/authors/');
     const url = `${BASE_URL}/authors/${id}.json`;
     ctx.log.debug('Fetching author', { authorId: id });
@@ -461,11 +461,7 @@ export class OpenLibraryService {
       error?: string;
     }>(url, ctx);
 
-    if (raw.error === 'notfound' || !raw.key) {
-      throw notFound(
-        `Author ${id} not found on Open Library. Verify the OLID or search by name first.`,
-      );
-    }
+    if (raw.error === 'notfound' || !raw.key) return null;
 
     const bio = extractDescription(raw.bio);
     return {
@@ -492,14 +488,14 @@ export class OpenLibraryService {
     limit: number,
     offset: number,
     ctx: Context,
-  ): Promise<{ total: number; author_id: string; works: AuthorWork[] }> {
+  ): Promise<{ total: number; author_id: string; works: AuthorWork[] } | null> {
     const id = stripPrefix(authorId, '/authors/');
     const url = `${BASE_URL}/authors/${id}/works.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching author works', { authorId: id, limit, offset });
 
     const raw = await this.fetch<{
-      size: number;
-      entries: Array<{
+      size?: number;
+      entries?: Array<{
         key: string;
         title?: string;
         first_publish_date?: string;
@@ -507,8 +503,11 @@ export class OpenLibraryService {
       }>;
     }>(url, ctx);
 
+    // Open Library returns {} (HTTP 404) for non-existent author IDs.
+    if (raw.size === undefined && raw.entries === undefined) return null;
+
     return {
-      total: raw.size,
+      total: raw.size ?? 0,
       author_id: id,
       works: (raw.entries ?? []).map((e) => ({
         work_id: stripPrefix(e.key ?? '', '/works/'),
@@ -531,7 +530,7 @@ export class OpenLibraryService {
     subject_key: string;
     work_count: number;
     works: SubjectWork[];
-  }> {
+  } | null> {
     const subjectKey = subject.toLowerCase().replace(/\s+/g, '_');
     const qs = new URLSearchParams({
       limit: String(limit),
@@ -554,11 +553,7 @@ export class OpenLibraryService {
       error?: string;
     }>(url, ctx);
 
-    if (raw.error === 'notfound' || (!raw.name && !raw.work_count)) {
-      throw notFound(
-        `Subject "${subject}" not found or has no works. Try a broader term (e.g., "fiction" instead of a specific subgenre).`,
-      );
-    }
+    if (raw.error === 'notfound' || (!raw.name && !raw.work_count)) return null;
 
     return {
       subject_name: raw.name ?? subject,

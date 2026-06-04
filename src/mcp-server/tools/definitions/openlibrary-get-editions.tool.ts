@@ -75,14 +75,16 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     },
   ],
 
-  handler(input, ctx) {
+  async handler(input, ctx) {
     ctx.log.info('Fetching editions', {
       work_id: input.work_id,
       limit: input.limit,
       offset: input.offset,
     });
     const svc = getOpenLibraryService();
-    return svc.getEditions(input.work_id, input.limit, input.offset, ctx);
+    const result = await svc.getEditions(input.work_id, input.limit, input.offset, ctx);
+    if (!result) throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
+    return result;
   },
 
   format: (result) => {

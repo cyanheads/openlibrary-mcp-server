@@ -49,19 +49,17 @@ describe('openlibraryGetAuthor — edge cases and security', () => {
     await expect(openlibraryGetAuthor.handler(input, ctx)).rejects.toThrow('Service unavailable');
   });
 
-  it('propagates not_found as NotFound code', async () => {
+  it('throws not_found via ctx.fail when service returns null (non-existent author)', async () => {
     const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getAuthor').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Author not found',
-    });
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL999999A' });
+    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryGetAuthor.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

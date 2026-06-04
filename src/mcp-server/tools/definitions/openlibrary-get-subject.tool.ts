@@ -78,6 +78,9 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
     const svc = getOpenLibraryService();
     const result = await svc.getSubject(input.subject, input.limit, input.offset, ctx);
 
+    if (!result)
+      throw ctx.fail('not_found', `Subject "${input.subject}" not found on Open Library.`);
+
     if (result.work_count === 0) {
       ctx.enrich.notice(
         `No works found for subject "${input.subject}". Subjects on Open Library are user-contributed and case-sensitive — try lowercase (e.g., "science fiction"), an alternate form, or a broader term.`,

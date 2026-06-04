@@ -43,19 +43,17 @@ describe('openlibraryGetWork', () => {
     expect(result.author_ids).toContain('OL24638A');
   });
 
-  it('throws not_found for unknown work IDs', async () => {
+  it('throws not_found via ctx.fail when service returns null', async () => {
     const ctx = createMockContext({ errors: openlibraryGetWork.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getWork').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Work OL999W not found on Open Library.',
-    });
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetWork.input.parse({ work_id: 'OL999W' });
+    const input = openlibraryGetWork.input.parse({ work_id: 'OL999999999W' });
     await expect(openlibraryGetWork.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

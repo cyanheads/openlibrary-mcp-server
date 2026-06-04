@@ -56,10 +56,13 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     },
   ],
 
-  handler(input, ctx) {
+  async handler(input, ctx) {
     ctx.log.info('Fetching author works', { author_id: input.author_id, limit: input.limit });
     const svc = getOpenLibraryService();
-    return svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
+    const result = await svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
+    if (!result)
+      throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
+    return result;
   },
 
   format: (result) => {

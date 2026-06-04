@@ -54,19 +54,17 @@ describe('openlibraryGetSubject', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
-  it('throws not_found for unknown subject', async () => {
+  it('throws not_found via ctx.fail when service returns null', async () => {
     const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getSubject').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Subject not found',
-    });
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(null);
 
     const input = openlibraryGetSubject.input.parse({ subject: 'zzz_nonexistent_xyz' });
     await expect(openlibraryGetSubject.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

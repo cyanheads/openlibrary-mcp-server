@@ -3,7 +3,7 @@
  * @module tests/resources/openlibrary-author.resource.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryAuthorResource } from '@/mcp-server/resources/definitions/openlibrary-author.resource.js';
@@ -50,11 +50,9 @@ describe('openlibraryAuthorResource', () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getAuthor').mockRejectedValueOnce(
-      new McpError(JsonRpcErrorCode.NotFound, 'Author OL999A not found on Open Library.'),
-    );
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(null);
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL999A' });
+    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryAuthorResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });

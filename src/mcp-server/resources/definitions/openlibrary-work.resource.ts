@@ -4,6 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryWorkResource = resource('openlibrary://works/{work_id}', {
@@ -29,8 +30,10 @@ export const openlibraryWorkResource = resource('openlibrary://works/{work_id}',
     last_modified: z.string().optional().describe('ISO 8601 last-modified timestamp.'),
   }),
 
-  handler(params, ctx) {
+  async handler(params, ctx) {
     ctx.log.info('Fetching work resource', { work_id: params.work_id });
-    return getOpenLibraryService().getWork(params.work_id, ctx);
+    const result = await getOpenLibraryService().getWork(params.work_id, ctx);
+    if (!result) throw notFound(`Work ${params.work_id} not found on Open Library.`);
+    return result;
   },
 });

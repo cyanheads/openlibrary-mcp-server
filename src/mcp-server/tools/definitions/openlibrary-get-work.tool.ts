@@ -55,10 +55,12 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     },
   ],
 
-  handler(input, ctx) {
+  async handler(input, ctx) {
     ctx.log.info('Fetching work', { work_id: input.work_id });
     const svc = getOpenLibraryService();
-    return svc.getWork(input.work_id, ctx);
+    const result = await svc.getWork(input.work_id, ctx);
+    if (!result) throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
+    return result;
   },
 
   format: (result) => {

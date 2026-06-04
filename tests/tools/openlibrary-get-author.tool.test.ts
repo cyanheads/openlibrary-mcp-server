@@ -47,19 +47,17 @@ describe('openlibraryGetAuthor', () => {
     expect(result.remote_ids.wikidata).toBe('Q36870');
   });
 
-  it('throws not_found for unknown author ID', async () => {
+  it('throws not_found via ctx.fail when service returns null', async () => {
     const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getAuthor').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Author not found',
-    });
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL999A' });
+    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryGetAuthor.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

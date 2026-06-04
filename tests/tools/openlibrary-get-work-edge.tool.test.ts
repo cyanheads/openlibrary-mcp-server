@@ -3,6 +3,7 @@
  * @module tests/tools/openlibrary-get-work-edge.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
@@ -22,6 +23,22 @@ const SPARSE_WORK = {
 describe('openlibraryGetWork — edge cases and security', () => {
   beforeEach(() => {
     initOpenLibraryService();
+  });
+
+  // ─── Not found error contract ────────────────────────────────────────────────
+
+  it('throws not_found via ctx.fail when service returns null (non-existent work)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetWork.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce(null);
+
+    const input = openlibraryGetWork.input.parse({ work_id: 'OL999999999W' });
+    await expect(openlibraryGetWork.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
   });
 
   // ─── Service error types ────────────────────────────────────────────────────

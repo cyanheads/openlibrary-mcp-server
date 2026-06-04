@@ -48,19 +48,17 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
 
   // ─── Not found error contract ────────────────────────────────────────────────
 
-  it('propagates not_found with JsonRpcErrorCode.NotFound', async () => {
+  it('throws not_found via ctx.fail when service returns null (non-existent author)', async () => {
     const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getAuthorWorks').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Author not found',
-    });
+    vi.spyOn(svc, 'getAuthorWorks').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL999999A' });
+    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryGetAuthorWorks.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

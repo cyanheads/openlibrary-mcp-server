@@ -3,6 +3,7 @@
  * @module tests/tools/openlibrary-get-subject-edge.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
@@ -37,6 +38,22 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   it('accepts limit 100 (maximum)', () => {
     const input = openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 100 });
     expect(input.limit).toBe(100);
+  });
+
+  // ─── Not found error contract ────────────────────────────────────────────────
+
+  it('throws not_found via ctx.fail when service returns null (unknown subject)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(null);
+
+    const input = openlibraryGetSubject.input.parse({ subject: 'zzznomatchzzz' });
+    await expect(openlibraryGetSubject.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
   });
 
   // ─── Unicode subjects ────────────────────────────────────────────────────────

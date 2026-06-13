@@ -49,8 +49,12 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
       .describe('Works under this subject, up to limit.'),
   }),
 
-  /** Agent-facing context: empty-result notice when the subject has no works. */
+  /** Agent-facing context: total work count and empty-result notice. */
   enrichment: {
+    totalCount: z
+      .number()
+      .optional()
+      .describe('Total works tagged with this subject across all pages.'),
     notice: z
       .string()
       .optional()
@@ -80,6 +84,8 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
 
     if (!result)
       throw ctx.fail('not_found', `Subject "${input.subject}" not found on Open Library.`);
+
+    ctx.enrich.total(result.work_count);
 
     if (result.work_count === 0) {
       ctx.enrich.notice(

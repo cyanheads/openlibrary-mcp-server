@@ -53,8 +53,12 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
       .describe('Matching authors, up to limit.'),
   }),
 
-  /** Agent-facing context: empty-result notice when no authors match. */
+  /** Agent-facing context: total count disclosure and empty-result notice. */
   enrichment: {
+    totalCount: z
+      .number()
+      .optional()
+      .describe('Total matching authors across all pages. Absent when results are empty.'),
     notice: z
       .string()
       .optional()
@@ -75,6 +79,7 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
       return { total: 0, authors: [] };
     }
 
+    ctx.enrich.total(result.total);
     return result;
   },
 

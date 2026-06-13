@@ -46,6 +46,9 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
       )
       .describe('Works by this author, up to limit.'),
   }),
+  enrichment: {
+    totalCount: z.number().optional().describe('Total works by this author across all pages.'),
+  },
   errors: [
     {
       reason: 'not_found',
@@ -62,6 +65,7 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     const result = await svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
     if (!result)
       throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
+    ctx.enrich.total(result.total);
     return result;
   },
 

@@ -139,7 +139,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .describe('Matching works, up to limit.'),
   }),
 
-  /** Agent-facing context: the parsed query echo and empty-result notice. */
+  /** Agent-facing context: the parsed query echo, total count, and empty-result notice. */
   enrichment: {
     queryEcho: z
       .string()
@@ -147,6 +147,10 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .describe(
         'The effective search criteria as the server interpreted them — query string plus any active field filters. Absent when only a bare query is used.',
       ),
+    totalCount: z
+      .number()
+      .optional()
+      .describe('Total matching works across all pages. Absent when results are empty.'),
     notice: z
       .string()
       .optional()
@@ -189,6 +193,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     }
 
     ctx.enrich({ queryEcho });
+    ctx.enrich.total(result.total);
     return { total: result.total, offset: result.offset, works: result.works };
   },
 

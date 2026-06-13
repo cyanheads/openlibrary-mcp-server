@@ -1,7 +1,8 @@
 .env*
 .mcpregistry_*
-.claude/
-.agents/
+/skills/
+/.claude/
+/.agents/
 Dockerfile
 bun.lock
 bunfig.toml

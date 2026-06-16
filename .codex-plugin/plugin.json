@@ -1,6 +1,6 @@
 {
-  "name": "@cyanheads/openlibrary-mcp-server",
-  "version": "0.1.13",
+  "name": "openlibrary-mcp-server",
+  "version": "0.1.14",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -13,7 +13,7 @@
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "open-library", "books", "authors", "isbn"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "@cyanheads/openlibrary-mcp-server",
+    "displayName": "openlibrary-mcp-server",
     "shortDescription": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library.",
     "longDescription": "",
     "developerName": "cyanheads",

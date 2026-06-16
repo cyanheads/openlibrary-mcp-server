@@ -1,6 +1,6 @@
 {
-  "name": "@cyanheads/openlibrary-mcp-server",
-  "version": "0.1.13",
+  "name": "openlibrary-mcp-server",
+  "version": "0.1.14",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"
@@ -9,7 +9,7 @@
   "repository": "https://github.com/cyanheads/openlibrary-mcp-server",
   "license": "Apache-2.0",
   "mcpServers": {
-    "@cyanheads/openlibrary-mcp-server": {
+    "openlibrary-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/openlibrary-mcp-server"],
       "env": {

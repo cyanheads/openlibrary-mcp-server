@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-06-15
+
+Server-level instructions sent on initialize, plus unscoped agent-facing display identity in the Claude Code and Codex plugin manifests.
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-06-12
 
 Adopt mcp-ts-core ^0.10.6: totalCount enrichment across the five paginated tools, explicit server identity, Docker healthcheck, and a post-pack MCPB bundle cleaner.

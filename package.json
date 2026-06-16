@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/openlibrary-mcp-server",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "mcpName": "io.github.cyanheads/openlibrary-mcp-server",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "type": "module",
@@ -26,7 +26,7 @@
     "bundle": "bun run build && npx -y @anthropic-ai/mcpb pack . dist/openlibrary-mcp-server.mcpb && bun run scripts/clean-mcpb.ts dist/openlibrary-mcp-server.mcpb",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
-    "release:github": "tsx scripts/release-github.ts",
+    "release:github": "bun run scripts/release-github.ts",
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js"

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-06-15
+
+Run the release:github script under bun instead of tsx, which is not an installed dependency.
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-06-15
 
 Server-level instructions sent on initialize, plus unscoped agent-facing display identity in the Claude Code and Codex plugin manifests.

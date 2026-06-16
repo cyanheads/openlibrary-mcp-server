@@ -21,6 +21,8 @@ import { initOpenLibraryService } from './services/open-library/open-library-ser
 await createApp({
   name: 'openlibrary-mcp-server',
   title: 'openlibrary-mcp-server',
+  instructions:
+    'Use the openlibrary_* tools to search books, editions, authors, and subjects via Open Library. No API key required. IDs are typed by suffix — works OL…W, editions OL…M, authors OL…A — and editions also resolve by ISBN. Canonical flow: openlibrary_search_books → openlibrary_get_work → openlibrary_get_editions/openlibrary_get_edition; for people, openlibrary_search_authors → openlibrary_get_author. Resolve cover/photo IDs with openlibrary_get_cover_url — it always returns HTTP 200, so a missing image is a 1×1 placeholder GIF, not an error.',
   landing: { requireAuth: false },
   tools: [
     openlibrarySearchBooks,

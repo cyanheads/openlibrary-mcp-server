@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-06-20
+
+Adopt mcp-ts-core ^0.10.9: check-dependency-specifiers devcheck step, plugin-manifest packaging lint, fresh-scaffold devcheck guards, and re-synced framework skills.
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-06-15
 
 Run the release:github script under bun instead of tsx, which is not an installed dependency.

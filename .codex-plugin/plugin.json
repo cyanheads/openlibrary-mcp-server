@@ -1,6 +1,6 @@
 {
   "name": "openlibrary-mcp-server",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -15,9 +15,9 @@
   "interface": {
     "displayName": "openlibrary-mcp-server",
     "shortDescription": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library.",
-    "longDescription": "",
+    "longDescription": "Query Open Library's catalog of 20M+ books, editions, authors, and subjects. Full-text book search with field filters (title, author, subject, publisher, ISBN, language), sort, and optional live Internet Archive reading availability; fetch works by OLID, list and fetch editions (by ISBN-10/13, OCLC, LCCN, or edition OLID), search and fetch authors with linked Wikidata/VIAF/ISNI identifiers, browse works by subject, and resolve cover/photo image URLs. Keyless and read-only. Runs over STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
-    "category": "",
+    "category": "research",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/openlibrary-mcp-server",
     "defaultPrompt": []

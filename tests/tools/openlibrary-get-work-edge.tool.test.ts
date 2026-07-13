@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -148,5 +148,53 @@ describe('openlibraryGetWork — edge cases and security', () => {
     expect(text).toContain('Jean Valjean');
     expect(text).toContain('42');
     expect(text).toContain('OL1A');
+  });
+
+  // ─── Subject text capping (#13) ──────────────────────────────────────────────
+
+  it('caps subjects in text and discloses the omitted count, keeping the full array', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetWork.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    // Zero-padded so subject-09 is not a substring of subject-10/-11.
+    const subjects = Array.from({ length: 12 }, (_, i) => `subject-${String(i).padStart(2, '0')}`);
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce({ ...SPARSE_WORK, subjects });
+
+    const input = openlibraryGetWork.input.parse({ work_id: 'OL27482W' });
+    const result = await openlibraryGetWork.handler(input, ctx);
+
+    // structuredContent keeps every subject.
+    expect(result.subjects).toHaveLength(12);
+
+    // The enrichment trailer discloses the cap and the true total.
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('showing 10 of 12');
+    expect(enrichment.notice).toContain('structuredContent');
+
+    // The text renders only the first 10 (SUBJECTS_TEXT_CAP).
+    const text = (openlibraryGetWork.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('subject-09');
+    expect(text).not.toContain('subject-10');
+    expect(text).not.toContain('subject-11');
+  });
+
+  it('does not disclose subject capping at exactly the cap (boundary)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetWork.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    const subjects = Array.from({ length: 10 }, (_, i) => `subject-${String(i).padStart(2, '0')}`);
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce({ ...SPARSE_WORK, subjects });
+
+    const input = openlibraryGetWork.input.parse({ work_id: 'OL27482W' });
+    const result = await openlibraryGetWork.handler(input, ctx);
+
+    // At exactly the cap nothing is omitted — no disclosure, all 10 render in text.
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+    const text = (openlibraryGetWork.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('subject-09');
   });
 });

@@ -7,6 +7,13 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
+/**
+ * Max subject tags rendered in the `content[]` text. `structuredContent` always
+ * carries the complete `subjects` array; only the human-facing text is capped,
+ * with the omitted count disclosed via the enrichment trailer.
+ */
+const SUBJECTS_TEXT_CAP = 10;
+
 export const openlibraryGetWork = tool('openlibrary_get_work', {
   title: 'Get Work',
   description:
@@ -55,11 +62,29 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     },
   ],
 
+  /** Agent-facing context: discloses when the text output caps a long subject list. */
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Disclosure when the text output caps a long list — names the omitted count and points to the complete array in structuredContent. Absent when nothing was capped.',
+      ),
+  },
+
   async handler(input, ctx) {
     ctx.log.info('Fetching work', { work_id: input.work_id });
     const svc = getOpenLibraryService();
     const result = await svc.getWork(input.work_id, ctx);
     if (!result) throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
+
+    // Disclose the subjects that format() caps out of the text; structuredContent keeps all.
+    if (result.subjects.length > SUBJECTS_TEXT_CAP) {
+      ctx.enrich.notice(
+        `Subjects are capped at ${SUBJECTS_TEXT_CAP} in text output; showing ${SUBJECTS_TEXT_CAP} of ${result.subjects.length}. The full list is in structuredContent (subjects).`,
+      );
+    }
+
     return result;
   },
 
@@ -79,7 +104,7 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
       lines.push(`**Cover IDs:** ${result.cover_ids.join(', ')}`);
     }
     if (result.subjects.length) {
-      lines.push(`**Subjects:** ${result.subjects.slice(0, 10).join(', ')}`);
+      lines.push(`**Subjects:** ${result.subjects.slice(0, SUBJECTS_TEXT_CAP).join(', ')}`);
     }
     if (result.subject_places.length) {
       lines.push(`**Places:** ${result.subject_places.join(', ')}`);

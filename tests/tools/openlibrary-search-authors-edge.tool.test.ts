@@ -105,20 +105,58 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     expect(text).not.toContain('undefined');
   });
 
-  it('formats author with exactly 5 top subjects (truncation boundary)', () => {
+  it('caps top subjects in text and discloses the omitted count, keeping the full array', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
     const author = {
       author_id: 'OL2A',
       name: 'Prolific Author',
       alternate_names: [],
       work_count: 50,
       top_subjects: ['Subject1', 'Subject2', 'Subject3', 'Subject4', 'Subject5', 'Subject6'],
-      // ratings_average absent
     };
-    const output = { total: 1, authors: [author] };
-    const text = (openlibrarySearchAuthors.format!(output)[0] as { text: string }).text;
-    // format() uses slice(0, 5) — 6th subject should not appear
+    vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({ total: 1, authors: [author] });
+
+    const input = openlibrarySearchAuthors.input.parse({ query: 'prolific' });
+    const result = await openlibrarySearchAuthors.handler(input, ctx);
+
+    // structuredContent keeps every top subject.
+    expect(result.authors[0]!.top_subjects).toHaveLength(6);
+
+    // The enrichment trailer discloses the cap and true total — previously silent.
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('showing 5 of 6');
+    expect(enrichment.notice).toContain('structuredContent');
+
+    // format() still caps the text at 5 — the 6th subject is omitted from content[].
+    const text = (openlibrarySearchAuthors.format!(result)[0] as { text: string }).text;
     expect(text).toContain('Subject5');
     expect(text).not.toContain('Subject6');
+  });
+
+  it('does not disclose top-subject capping at exactly the cap (boundary)', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    const author = {
+      author_id: 'OL2A',
+      name: 'Boundary Author',
+      alternate_names: [],
+      work_count: 50,
+      top_subjects: ['Subject1', 'Subject2', 'Subject3', 'Subject4', 'Subject5'],
+    };
+    vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({ total: 1, authors: [author] });
+
+    const input = openlibrarySearchAuthors.input.parse({ query: 'boundary' });
+    await openlibrarySearchAuthors.handler(input, ctx);
+
+    // Exactly 5 subjects, cap 5 — nothing omitted, so no truncation disclosure.
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
   it('formats empty results cleanly', () => {

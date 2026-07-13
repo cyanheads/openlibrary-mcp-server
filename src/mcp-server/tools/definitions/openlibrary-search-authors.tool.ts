@@ -6,6 +6,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
+/**
+ * Max top-subject tags rendered per author in the `content[]` text.
+ * `structuredContent` always carries the complete `top_subjects` array; only the
+ * human-facing text is capped, with the omitted count disclosed via the
+ * enrichment trailer.
+ */
+const TOP_SUBJECTS_TEXT_CAP = 5;
+
 export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
   title: 'Search Authors',
   description:
@@ -80,6 +88,22 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
     }
 
     ctx.enrich.total(result.total);
+
+    // Disclose the top subjects that format() caps out of the text; structuredContent keeps all.
+    const subjectsShown = result.authors.reduce(
+      (sum, author) => sum + Math.min(author.top_subjects.length, TOP_SUBJECTS_TEXT_CAP),
+      0,
+    );
+    const subjectsTotal = result.authors.reduce(
+      (sum, author) => sum + author.top_subjects.length,
+      0,
+    );
+    if (subjectsTotal > subjectsShown) {
+      ctx.enrich.notice(
+        `Top subjects are capped at ${TOP_SUBJECTS_TEXT_CAP} per author in text output; showing ${subjectsShown} of ${subjectsTotal}. Full per-author lists are in structuredContent (authors[].top_subjects).`,
+      );
+    }
+
     return result;
   },
 
@@ -101,7 +125,9 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
       if (author.alternate_names.length)
         lines.push(`**Alternate names:** ${author.alternate_names.join(', ')}`);
       if (author.top_subjects.length)
-        lines.push(`**Top subjects:** ${author.top_subjects.slice(0, 5).join(', ')}`);
+        lines.push(
+          `**Top subjects:** ${author.top_subjects.slice(0, TOP_SUBJECTS_TEXT_CAP).join(', ')}`,
+        );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

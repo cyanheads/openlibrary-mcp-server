@@ -5,7 +5,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
@@ -45,6 +45,36 @@ function extractDescription(raw: unknown): string | undefined {
   return;
 }
 
+/**
+ * True when an error is the status-mapped `McpError` that `fetchWithTimeout`
+ * throws on an upstream HTTP 404. `withRetry` rethrows it unchanged (NotFound is
+ * not a transient code), so `data.statusCode` reaches here intact. Callers map
+ * this to an absent-record `null` so each tool's own `not_found` path fires
+ * instead of the raw fetch-layer error leaking to the client.
+ */
+function isUpstreamNotFound(err: unknown): boolean {
+  return err instanceof McpError && err.data?.statusCode === 404;
+}
+
+/**
+ * True when a cover identifier contains characters that would let it escape its
+ * path segment in the Covers API URL — path separators (`/`, `\`), a
+ * parent-directory sequence (`..`), or any control character (0x00–0x1F, 0x7F).
+ * A cover must resolve to the exact identifier supplied, never a reinterpreted
+ * path. Control characters are scanned by code point rather than embedded in a
+ * regex (which `noControlCharactersInRegex` forbids).
+ */
+export function isUnsafeCoverIdentifier(identifier: string): boolean {
+  if (identifier.includes('/') || identifier.includes('\\') || identifier.includes('..')) {
+    return true;
+  }
+  for (let i = 0; i < identifier.length; i++) {
+    const code = identifier.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 export class OpenLibraryService {
   private readonly userAgent: string;
 
@@ -80,6 +110,22 @@ export class OpenLibraryService {
         signal: ctx.signal,
       },
     );
+  }
+
+  /**
+   * Fetches JSON like {@link fetch}, but resolves to `null` when the upstream
+   * returns HTTP 404 instead of throwing. Open Library 404s on missing by-ID
+   * records, so mapping that to `null` revives each caller's own `not_found`
+   * path — their `ctx.fail('not_found', …)` / `notFound()` with tool-specific
+   * recovery — instead of leaking the raw status-mapped fetch error.
+   */
+  private async fetchOrNull<T>(url: string, ctx: Context): Promise<T | null> {
+    try {
+      return await this.fetch<T>(url, ctx);
+    } catch (err) {
+      if (isUpstreamNotFound(err)) return null;
+      throw err;
+    }
   }
 
   // ─── Search ───────────────────────────────────────────────────────────────────
@@ -180,7 +226,7 @@ export class OpenLibraryService {
     const url = `${BASE_URL}/works/${id}.json`;
     ctx.log.debug('Fetching work', { workId: id });
 
-    const raw = await this.fetch<{
+    const raw = await this.fetchOrNull<{
       key: string;
       title: string;
       description?: unknown;
@@ -194,7 +240,7 @@ export class OpenLibraryService {
       last_modified?: { value: string };
     }>(url, ctx);
 
-    if (!raw.key) return null;
+    if (!raw?.key) return null;
 
     const desc = extractDescription(raw.description);
     return {
@@ -224,7 +270,7 @@ export class OpenLibraryService {
     const url = `${BASE_URL}/works/${id}/editions.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching editions', { workId: id, limit, offset });
 
-    const raw = await this.fetch<{
+    const raw = await this.fetchOrNull<{
       size: number;
       entries: Array<{
         key: string;
@@ -240,7 +286,7 @@ export class OpenLibraryService {
       }>;
     }>(url, ctx);
 
-    if (!raw.entries) return null;
+    if (!raw?.entries) return null;
 
     const editions: EditionSummary[] = raw.entries.map((e) => ({
       edition_id: stripPrefix(e.key ?? '', '/books/'),
@@ -271,7 +317,7 @@ export class OpenLibraryService {
       const path =
         idType === 'isbn' ? `isbn/${identifier.replace(/-/g, '')}` : `books/${identifier}`;
       const url = `${BASE_URL}/${path}.json`;
-      const raw = await this.fetch<{
+      const raw = await this.fetchOrNull<{
         key?: string;
         title?: string;
         authors?: Array<{ key: string }>;
@@ -290,9 +336,10 @@ export class OpenLibraryService {
         error?: string;
       }>(url, ctx);
 
-      if (raw.error === 'notfound' || !raw.key) {
+      if (!raw || raw.error === 'notfound' || !raw.key) {
         throw notFound(
           `Edition not found for ${idType.toUpperCase()} "${identifier}". Verify the identifier or try searching by title/author.`,
+          { reason: 'not_found', ...ctx.recoveryFor('not_found') },
         );
       }
 
@@ -366,6 +413,7 @@ export class OpenLibraryService {
     if (!entry?.details?.key) {
       throw notFound(
         `Edition not found for ${prefix} "${identifier}". Verify the identifier or try searching by title/author.`,
+        { reason: 'not_found', ...ctx.recoveryFor('not_found') },
       );
     }
 
@@ -442,7 +490,7 @@ export class OpenLibraryService {
     const url = `${BASE_URL}/authors/${id}.json`;
     ctx.log.debug('Fetching author', { authorId: id });
 
-    const raw = await this.fetch<{
+    const raw = await this.fetchOrNull<{
       key?: string;
       name?: string;
       personal_name?: string;
@@ -461,7 +509,7 @@ export class OpenLibraryService {
       error?: string;
     }>(url, ctx);
 
-    if (raw.error === 'notfound' || !raw.key) return null;
+    if (!raw || raw.error === 'notfound' || !raw.key) return null;
 
     const bio = extractDescription(raw.bio);
     return {
@@ -493,7 +541,7 @@ export class OpenLibraryService {
     const url = `${BASE_URL}/authors/${id}/works.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching author works', { authorId: id, limit, offset });
 
-    const raw = await this.fetch<{
+    const raw = await this.fetchOrNull<{
       size?: number;
       entries?: Array<{
         key: string;
@@ -503,8 +551,8 @@ export class OpenLibraryService {
       }>;
     }>(url, ctx);
 
-    // Open Library returns {} (HTTP 404) for non-existent author IDs.
-    if (raw.size === undefined && raw.entries === undefined) return null;
+    // A 404 maps to null via fetchOrNull; an empty {} 200 carries neither field.
+    if (!raw || (raw.size === undefined && raw.entries === undefined)) return null;
 
     return {
       total: raw.size ?? 0,
@@ -577,6 +625,20 @@ export class OpenLibraryService {
     target: 'book' | 'author',
     size: 'S' | 'M' | 'L',
   ): string {
+    // Enforcement seam: never interpolate an identifier that could escape its
+    // path segment, and never build a nonsensical author-by-ISBN lookup. The
+    // tool surfaces these as typed ctx.fail rejections; this guards direct calls.
+    if (isUnsafeCoverIdentifier(identifier)) {
+      throw validationError(
+        `Cover identifier "${identifier}" contains path separators or control characters.`,
+        { reason: 'invalid_identifier' },
+      );
+    }
+    if (target === 'author' && idType === 'isbn') {
+      throw validationError('Author photos cannot be looked up by ISBN.', {
+        reason: 'invalid_target',
+      });
+    }
     const prefix = target === 'author' ? 'a' : 'b';
     const clean = idType === 'isbn' ? identifier.replace(/-/g, '') : identifier;
     return `${COVERS_URL}/${prefix}/${idType}/${clean}-${size}.jpg`;

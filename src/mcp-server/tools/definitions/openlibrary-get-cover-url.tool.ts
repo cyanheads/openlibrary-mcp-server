@@ -4,12 +4,16 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  getOpenLibraryService,
+  isUnsafeCoverIdentifier,
+} from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
   title: 'Get Cover URL',
   description:
-    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404. URLs can be embedded in markdown as ![cover](url).',
+    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404. Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected locally before any request. URLs can be embedded in markdown as ![cover](url).',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     identifier: z
@@ -48,6 +52,22 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
       ),
   }),
 
+  errors: [
+    {
+      reason: 'invalid_identifier',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The identifier contains path separators, "..", or control characters.',
+      recovery: 'Pass the bare cover ID, photo ID, ISBN, or OLID with no slashes or path segments.',
+    },
+    {
+      reason: 'invalid_target',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The id_type is not valid for the target — an author photo cannot be resolved by ISBN.',
+      recovery:
+        'For author photos use id_type "id" (photo_id) or "olid"; ISBN resolves book covers only.',
+    },
+  ],
+
   handler(input, ctx) {
     ctx.log.info('Resolving cover URL', {
       identifier: input.identifier,
@@ -55,6 +75,20 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
       target: input.target,
       size: input.size,
     });
+    if (isUnsafeCoverIdentifier(input.identifier)) {
+      throw ctx.fail(
+        'invalid_identifier',
+        `"${input.identifier}" contains path separators or control characters.`,
+        ctx.recoveryFor('invalid_identifier'),
+      );
+    }
+    if (input.target === 'author' && input.id_type === 'isbn') {
+      throw ctx.fail(
+        'invalid_target',
+        'Author photos cannot be looked up by ISBN; use id_type "id" or "olid".',
+        ctx.recoveryFor('invalid_target'),
+      );
+    }
     const svc = getOpenLibraryService();
     const url = svc.getCoverUrl(input.identifier, input.id_type, input.target, input.size);
     return {

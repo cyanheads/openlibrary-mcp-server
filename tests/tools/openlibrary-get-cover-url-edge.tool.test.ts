@@ -3,10 +3,21 @@
  * @module tests/tools/openlibrary-get-cover-url-edge.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openlibraryGetCoverUrl } from '@/mcp-server/tools/definitions/openlibrary-get-cover-url.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+
+/** Invokes a synchronous handler and returns whatever it throws (or undefined). */
+function caught(fn: () => unknown): unknown {
+  try {
+    fn();
+    return;
+  } catch (err) {
+    return err;
+  }
+}
 
 describe('openlibraryGetCoverUrl — edge cases and security', () => {
   beforeEach(() => {
@@ -81,19 +92,47 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
 
   // ─── Security: path traversal and injection in identifier ──────────────────
 
-  it('does not produce a path-traversal URL from identifier with slashes', () => {
-    const ctx = createMockContext();
-    // An identifier containing path-traversal chars should be passed verbatim to
-    // the URL builder; openlibrary.org will reject it. What we assert here is that
-    // the server does not strip the characters silently and produce a different
-    // identifier-path than what the caller supplied.
+  it('rejects an identifier with path separators instead of building a traversal URL', () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '123/../456',
       id_type: 'id',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
-    // The URL must contain the original identifier, not a resolved path
-    expect(result.url).toContain('123/../456');
+    // Pre-fix this returned covers.openlibrary.org/b/id/123/../456-M.jpg, which the
+    // CDN collapsed to a different cover (456). The identifier must now be rejected
+    // locally so the caller-supplied value can never be reinterpreted.
+    const error = caught(() => openlibraryGetCoverUrl.handler(input, ctx));
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_identifier' },
+    });
+  });
+
+  it('rejects an identifier containing a control character', () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+    const input = openlibraryGetCoverUrl.input.parse({
+      identifier: `12${String.fromCharCode(0x1f)}34`,
+      id_type: 'id',
+    });
+    const error = caught(() => openlibraryGetCoverUrl.handler(input, ctx));
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_identifier' },
+    });
+  });
+
+  it('rejects the author target with isbn id_type as an incompatible combination', () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+    const input = openlibraryGetCoverUrl.input.parse({
+      identifier: '9780743273565',
+      id_type: 'isbn',
+      target: 'author',
+    });
+    const error = caught(() => openlibraryGetCoverUrl.handler(input, ctx));
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_target' },
+    });
   });
 
   it('strips hyphens from ISBN identifier (not from olid or id)', () => {

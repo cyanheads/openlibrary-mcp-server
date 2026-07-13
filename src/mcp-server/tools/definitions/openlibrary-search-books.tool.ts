@@ -6,6 +6,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
+/**
+ * Max Internet Archive identifiers rendered per work in the `content[]` text.
+ * `structuredContent` always carries the complete `ia_identifiers` array; only
+ * the human-facing text is capped, with the omitted count disclosed via the
+ * enrichment trailer.
+ */
+const IA_TEXT_CAP = 5;
+
 export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   title: 'Search Books',
   description:
@@ -187,13 +195,29 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       const hint = filters.length
         ? `No works matched ${filters.join(', ')}. Try broader or different terms.`
         : 'No works matched your search. Try different filters or a general query.';
-      ctx.enrich({ queryEcho });
+      // Only echo when there is an effective echo value — keying `queryEcho: undefined`
+      // survives the enrichment parse and renders a literal "undefined" in the trailer.
+      if (queryEcho !== undefined) ctx.enrich({ queryEcho });
       ctx.enrich.notice(hint);
       return { total: 0, offset: result.offset, works: [] };
     }
 
-    ctx.enrich({ queryEcho });
+    if (queryEcho !== undefined) ctx.enrich({ queryEcho });
     ctx.enrich.total(result.total);
+
+    // Disclose the Internet Archive identifiers that format() caps out of the text.
+    // structuredContent keeps every id; the notice names how many the text omits.
+    const iaShown = result.works.reduce(
+      (sum, work) => sum + Math.min(work.ia_identifiers.length, IA_TEXT_CAP),
+      0,
+    );
+    const iaTotal = result.works.reduce((sum, work) => sum + work.ia_identifiers.length, 0);
+    if (iaTotal > iaShown) {
+      ctx.enrich.notice(
+        `Internet Archive identifiers are capped at ${IA_TEXT_CAP} per work in text output; showing ${iaShown} of ${iaTotal}. Full per-work lists are in structuredContent (works[].ia_identifiers).`,
+      );
+    }
+
     return { total: result.total, offset: result.offset, works: result.works };
   },
 
@@ -221,7 +245,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       lines.push(meta.join(' | '));
       if (work.cover_id != null) lines.push(`**Cover ID:** ${work.cover_id}`);
       if (work.subjects?.length) lines.push(`**Subjects:** ${work.subjects.join(', ')}`);
-      if (work.ia_identifiers.length) lines.push(`**IA:** ${work.ia_identifiers.join(', ')}`);
+      if (work.ia_identifiers.length) {
+        lines.push(`**IA:** ${work.ia_identifiers.slice(0, IA_TEXT_CAP).join(', ')}`);
+      }
       if (work.availability != null) {
         const avParts = [
           `Status: ${work.availability.status}`,

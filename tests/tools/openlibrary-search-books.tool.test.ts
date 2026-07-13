@@ -182,4 +182,59 @@ describe('openlibrarySearchBooks', () => {
     expect(input.offset).toBe(0);
     expect(input.include_availability).toBe(false);
   });
+
+  // ─── IA-identifier text capping (#11) ────────────────────────────────────────
+
+  it('caps IA identifiers in text but keeps the full array in structuredContent', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    // Zero-padded so no id is a substring prefix of another (e.g. ia-004 vs ia-047).
+    const iaIds = Array.from({ length: 48 }, (_, i) => `ia-${String(i).padStart(3, '0')}`);
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 1,
+      offset: 0,
+      works: [makeWork({ ia_identifiers: iaIds })],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'gatsby', limit: 1 });
+    const result = await openlibrarySearchBooks.handler(input, ctx);
+
+    // structuredContent (the handler return) keeps every identifier.
+    expect(result.works[0]!.ia_identifiers).toHaveLength(48);
+
+    // The enrichment trailer discloses the true total and how many the text shows.
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('Internet Archive');
+    expect(enrichment.notice).toContain('showing 5 of 48');
+    expect(enrichment.notice).toContain('structuredContent');
+
+    // The text renders only the first 5 (IA_TEXT_CAP) identifiers.
+    const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('ia-004');
+    expect(text).not.toContain('ia-005');
+    expect(text).not.toContain('ia-047');
+  });
+
+  it('does not disclose IA capping when a work has no identifiers', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 1,
+      offset: 0,
+      works: [makeWork({ ia_identifiers: [] })],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'gatsby', limit: 1 });
+    const result = await openlibrarySearchBooks.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+    const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
+    expect(text).not.toContain('**IA:**');
+  });
 });

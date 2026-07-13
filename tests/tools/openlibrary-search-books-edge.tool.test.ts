@@ -83,8 +83,28 @@ describe('openlibrarySearchBooks — edge cases and security', () => {
     await openlibrarySearchBooks.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
-    // Single bare query produces no queryEcho (only multi-filter does)
-    expect(enrichment.queryEcho).toBeUndefined();
+    // A bare single-filter query must OMIT the queryEcho key entirely. Keying it as
+    // `undefined` survives the enrichment parse and renders a literal "undefined" in
+    // the content[] trailer (#10) — `toBeUndefined()` would pass either way, so assert
+    // key absence.
+    expect('queryEcho' in enrichment).toBe(false);
+  });
+
+  it('omits queryEcho for a bare query that yields no results', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({ total: 0, offset: 0, works: [] });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'zzznoresultsquery' });
+    await openlibrarySearchBooks.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    // The empty-result branch reproduced the same undefined-literal bug — assert the
+    // key is absent there too, while the recovery notice still lands.
+    expect('queryEcho' in enrichment).toBe(false);
+    expect(enrichment.notice).toBeDefined();
   });
 
   it('populates queryEcho when both title and author filters are active', async () => {
@@ -105,7 +125,8 @@ describe('openlibrarySearchBooks — edge cases and security', () => {
     await openlibrarySearchBooks.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.queryEcho).toBeDefined();
+    // Echo case: the key is present with the composed filter string.
+    expect('queryEcho' in enrichment).toBe(true);
     expect(enrichment.queryEcho).toContain('gatsby');
     expect(enrichment.queryEcho).toContain('fitzgerald');
   });

@@ -80,7 +80,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Identifier format is invalid for the specified id_type.',
       recovery:
-        'Check the identifier format: ISBNs are 10 or 13 digits; OLIDs end in M (e.g., OL7353617M).',
+        'Check the identifier format: ISBNs are 10 or 13 digits; OCLC numbers are numeric; OLIDs end in M (e.g., OL7353617M).',
     },
   ],
 
@@ -104,6 +104,15 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           ctx.fail(
             'invalid_identifier',
             `"${input.identifier}" is not a valid Open Library Edition ID. Expected format: OL…M (e.g., OL7353617M).`,
+          ),
+        );
+      }
+    } else if (input.id_type === 'oclc') {
+      if (!/^\d+$/.test(input.identifier)) {
+        return Promise.reject(
+          ctx.fail(
+            'invalid_identifier',
+            `"${input.identifier}" is not a valid OCLC number (must be numeric).`,
           ),
         );
       }

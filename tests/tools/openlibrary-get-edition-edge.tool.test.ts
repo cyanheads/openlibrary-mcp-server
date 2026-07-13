@@ -155,6 +155,24 @@ describe('openlibraryGetEdition — edge cases', () => {
     expect(spy).toHaveBeenCalledWith('00027665', 'lccn', ctx);
   });
 
+  it('rejects a non-numeric OCLC identifier locally before any upstream call', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    // Mocked so a regression that skips validation cannot reach the live API.
+    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValue(FULL_EDITION);
+
+    const input = openlibraryGetEdition.input.parse({
+      identifier: 'abc-not-oclc',
+      id_type: 'oclc',
+    });
+    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_identifier' },
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   // ─── not_found error from service ──────────────────────────────────────────
 
   it('propagates not_found for OCLC identifier', async () => {

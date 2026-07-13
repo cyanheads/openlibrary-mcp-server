@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-13
+
+Text output no longer silently drops data past its display cap — omitted subjects, top subjects, and Internet Archive identifiers are now disclosed via the enrichment trailer, and a stray literal queryEcho no longer leaks into search_books text.
+
 ## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-13 · 🛡️ Security
 
 Cover-URL path-traversal identifiers now rejected locally; upstream 404s normalized instead of leaking raw fetch errors; OCLC identifiers validated before lookup; mcp-ts-core ^0.10.14 adoption with Bun supply-chain hardening.

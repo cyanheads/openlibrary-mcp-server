@@ -10,7 +10,7 @@ import { getOpenLibraryService } from '@/services/open-library/open-library-serv
 export const openlibraryGetEdition = tool('openlibrary_get_edition', {
   title: 'Get Edition',
   description:
-    'Fetch a single edition by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Returns full edition metadata including authors, publisher, language, all identifier types, and the parent work ID. Use for ISBN lookups — pass id_type "isbn" for both ISBN-10 and ISBN-13.',
+    'Fetch a single edition by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Returns full edition metadata including authors, publisher, language, all identifier types, and the parent work ID. When the edition record itself lists no authors, they are recovered from the parent work and marked as such. Use for ISBN lookups — pass id_type "isbn" for both ISBN-10 and ISBN-13.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     identifier: z
@@ -38,10 +38,17 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
               .describe(
                 'Open Library Author ID (OL…A). Use openlibrary_get_author for bio and details.',
               ),
+            source: z
+              .enum(['edition', 'work'])
+              .describe(
+                '"edition" = the attribution is recorded on this edition record. "work" = the edition records no authors of its own and this credit comes from the parent work, which covers every edition of the same text.',
+              ),
           })
           .describe('An author contributor for this edition.'),
       )
-      .describe('Authors of this edition.'),
+      .describe(
+        'Authors credited for this edition. Empty only when neither the edition nor its parent work records an author.',
+      ),
     publish_date: z
       .string()
       .optional()
@@ -54,7 +61,16 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
     isbn_10: z.array(z.string()).describe('ISBN-10 identifiers.'),
     isbn_13: z.array(z.string()).describe('ISBN-13 identifiers.'),
     oclc: z.array(z.string()).describe('OCLC/WorldCat numbers.'),
-    lccn: z.array(z.string()).describe('Library of Congress Control Numbers.'),
+    lccn: z
+      .array(z.string())
+      .describe(
+        'Library of Congress Control Numbers (e.g., "2008478952") — lookupable identifiers; each one resolves this edition back through this tool with id_type "lccn".',
+      ),
+    lc_classifications: z
+      .array(z.string())
+      .describe(
+        'Library of Congress call numbers (e.g., "TL685.7 .M366 2008") — shelving classifications describing the subject, not identifiers. Not usable as a lookup value anywhere.',
+      ),
     page_count: z.number().optional().describe('Page count. Absent when not recorded.'),
     description: z.string().optional().describe('Edition description. Absent when not provided.'),
     cover_ids: z.array(z.number()).describe('Numeric cover IDs for openlibrary_get_cover_url.'),
@@ -126,11 +142,17 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
     const lines: string[] = [];
     lines.push(`## ${result.title}`);
     lines.push(`**Edition ID:** ${result.edition_id}`);
-    if (result.authors.length) {
-      const authorStr = result.authors
-        .map((a) => (a.author_id ? `${a.name} (${a.author_id})` : a.name))
-        .join(', ');
-      lines.push(`**Authors:** ${authorStr}`);
+    const renderAuthor = (a: { name: string; author_id?: string | undefined }) =>
+      a.author_id ? `${a.name} (${a.author_id})` : a.name;
+    const editionAuthors = result.authors.filter((a) => a.source === 'edition');
+    const workAuthors = result.authors.filter((a) => a.source === 'work');
+    if (editionAuthors.length) {
+      lines.push(`**Authors:** ${editionAuthors.map(renderAuthor).join(', ')}`);
+    }
+    if (workAuthors.length) {
+      lines.push(
+        `**Authors (from parent work — not recorded on this edition):** ${workAuthors.map(renderAuthor).join(', ')}`,
+      );
     }
     const meta: string[] = [];
     if (result.publish_date) meta.push(`Published: ${result.publish_date}`);
@@ -142,6 +164,9 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
     if (result.isbn_10.length) lines.push(`**ISBN-10:** ${result.isbn_10.join(', ')}`);
     if (result.oclc.length) lines.push(`**OCLC:** ${result.oclc.join(', ')}`);
     if (result.lccn.length) lines.push(`**LCCN:** ${result.lccn.join(', ')}`);
+    if (result.lc_classifications.length) {
+      lines.push(`**LC call number:** ${result.lc_classifications.join(', ')}`);
+    }
     if (result.description) {
       lines.push('');
       lines.push(result.description);

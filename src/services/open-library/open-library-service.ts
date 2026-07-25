@@ -8,10 +8,12 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { normalizeLanguageCode } from './language-codes.js';
 import type {
   AuthorDetail,
   AuthorSearchResult,
   AuthorWork,
+  EditionAuthor,
   EditionDetail,
   EditionIdType,
   EditionSummary,
@@ -25,6 +27,15 @@ const BASE_URL = 'https://openlibrary.org';
 const COVERS_URL = 'https://covers.openlibrary.org';
 const TIMEOUT_MS = 15_000;
 
+/** Every `ebook_access` tier Open Library publishes, in ascending order of access. */
+const EBOOK_ACCESS_TIERS: ReadonlySet<string> = new Set<SearchWork['ebook_access']>([
+  'no_ebook',
+  'unclassified',
+  'printdisabled',
+  'borrowable',
+  'public',
+]);
+
 /** Strips a leading path segment prefix from an OL ID (e.g. "/works/OL45804W" → "OL45804W"). */
 function stripPrefix(id: string, prefix: string): string {
   return id.startsWith(prefix) ? id.slice(prefix.length) : id;
@@ -34,6 +45,22 @@ function stripPrefix(id: string, prefix: string): string {
 function extractLanguageCode(key: string): string {
   const parts = key.split('/');
   return parts[parts.length - 1] ?? key;
+}
+
+/**
+ * Maps an upstream `ebook_access` string onto the known tier union. Open Library
+ * can add tiers at any time and the tool's output schema is a strict enum, so an
+ * unrecognized value is reported as `unclassified` — the tier that already means
+ * "access not determined" — instead of failing validation and discarding the
+ * whole page of results over one work's unexpected field.
+ */
+function toEbookAccess(raw: string | null | undefined, ctx: Context): SearchWork['ebook_access'] {
+  // Open Library nulls absent fields rather than omitting them, so an unset tier
+  // arrives as `null` as often as `undefined` — neither is an unrecognized tier.
+  if (raw == null) return 'no_ebook';
+  if (EBOOK_ACCESS_TIERS.has(raw)) return raw as SearchWork['ebook_access'];
+  ctx.log.warning('Unrecognized ebook_access tier from Open Library', { value: raw });
+  return 'unclassified';
 }
 
 /** Normalizes a description that may be a string or { value: string } object. */
@@ -48,12 +75,12 @@ function extractDescription(raw: unknown): string | undefined {
 /**
  * True when an error is the status-mapped `McpError` that `fetchWithTimeout`
  * throws on an upstream HTTP 404. `withRetry` rethrows it unchanged (NotFound is
- * not a transient code), so `data.statusCode` reaches here intact. Callers map
- * this to an absent-record `null` so each tool's own `not_found` path fires
- * instead of the raw fetch-layer error leaking to the client.
+ * not a transient code), so `data.status` reaches here intact. Callers map this
+ * to an absent-record `null` so each tool's own `not_found` path fires instead
+ * of the raw fetch-layer error leaking to the client.
  */
 function isUpstreamNotFound(err: unknown): boolean {
-  return err instanceof McpError && err.data?.statusCode === 404;
+  return err instanceof McpError && err.data?.status === 404;
 }
 
 /**
@@ -86,7 +113,7 @@ export class OpenLibraryService {
     return { 'User-Agent': this.userAgent };
   }
 
-  private fetch<T>(url: string, ctx: Context): Promise<T> {
+  private fetch<T>(url: string, ctx: Context, expectedStatuses?: number[]): Promise<T> {
     // `fetchWithTimeout` and `withRetry` accept `RequestContext` which requires an index signature.
     // `Context` is structurally compatible at runtime — cast is safe per framework docs.
     // biome-ignore lint/suspicious/noExplicitAny: safe per framework docs
@@ -96,6 +123,7 @@ export class OpenLibraryService {
         const response = await fetchWithTimeout(url, TIMEOUT_MS, rCtx, {
           headers: this.headers(),
           signal: ctx.signal,
+          ...(expectedStatuses ? { expectedStatuses } : {}),
         });
         const text = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
@@ -117,11 +145,13 @@ export class OpenLibraryService {
    * returns HTTP 404 instead of throwing. Open Library 404s on missing by-ID
    * records, so mapping that to `null` revives each caller's own `not_found`
    * path — their `ctx.fail('not_found', …)` / `notFound()` with tool-specific
-   * recovery — instead of leaking the raw status-mapped fetch error.
+   * recovery — instead of leaking the raw status-mapped fetch error. A 404 is
+   * an outcome here, not a failure, so it is declared expected and logs at
+   * `debug` rather than `error`.
    */
   private async fetchOrNull<T>(url: string, ctx: Context): Promise<T | null> {
     try {
-      return await this.fetch<T>(url, ctx);
+      return await this.fetch<T>(url, ctx, [404]);
     } catch (err) {
       if (isUpstreamNotFound(err)) return null;
       throw err;
@@ -154,7 +184,9 @@ export class OpenLibraryService {
     if (params.subject) qs.set('subject', params.subject);
     if (params.publisher) qs.set('publisher', params.publisher);
     if (params.isbn) qs.set('isbn', params.isbn.replace(/-/g, ''));
-    if (params.language) qs.set('lang', params.language);
+    // `language=` is the result filter and takes 3-letter MARC codes; `lang=` is
+    // Open Library's UI-language parameter and filters nothing.
+    if (params.language) qs.set('language', normalizeLanguageCode(params.language));
     if (params.sort && params.sort !== 'relevance') {
       qs.set('sort', params.sort);
     }
@@ -192,7 +224,7 @@ export class OpenLibraryService {
 
     const works: SearchWork[] = raw.docs.map((doc) => {
       const workId = doc.key ? stripPrefix(doc.key, '/works/') : '';
-      const ebookAccess = (doc.ebook_access as SearchWork['ebook_access']) ?? 'no_ebook';
+      const ebookAccess = toEbookAccess(doc.ebook_access, ctx);
       return {
         work_id: workId,
         title: doc.title ?? '',
@@ -306,6 +338,50 @@ export class OpenLibraryService {
 
   // ─── Edition by identifier ────────────────────────────────────────────────────
 
+  /**
+   * Resolves `/authors/{id}` display names in parallel, tagging each entry with
+   * the provenance of the attribution. An author whose lookup fails degrades to
+   * its own ID as the name rather than dropping the credit entirely.
+   */
+  private resolveAuthors(
+    authorKeys: string[],
+    source: EditionAuthor['source'],
+    ctx: Context,
+  ): Promise<EditionAuthor[]> {
+    return Promise.all(
+      authorKeys.map(async (key) => {
+        const authorId = stripPrefix(key, '/authors/');
+        try {
+          const authorRaw = await this.fetch<{ name?: string }>(
+            `${BASE_URL}/authors/${authorId}.json`,
+            ctx,
+          );
+          return { name: authorRaw.name ?? authorId, author_id: authorId, source };
+        } catch {
+          return { name: authorId, author_id: authorId, source };
+        }
+      }),
+    );
+  }
+
+  /**
+   * Author keys recorded on an edition's parent work. Open Library records
+   * authorship at the work level for many editions, so an edition with no
+   * `authors` of its own is usually attributed here rather than genuinely
+   * anonymous.
+   */
+  private async workAuthorKeys(workKey: string | undefined, ctx: Context): Promise<string[]> {
+    if (!workKey) return [];
+    const workId = stripPrefix(workKey, '/works/');
+    const raw = await this.fetchOrNull<{ authors?: Array<{ author?: { key?: string } }> }>(
+      `${BASE_URL}/works/${workId}.json`,
+      ctx,
+    );
+    return (raw?.authors ?? [])
+      .map((entry) => entry.author?.key)
+      .filter((key): key is string => typeof key === 'string');
+  }
+
   async getEditionByIdentifier(
     identifier: string,
     idType: EditionIdType,
@@ -327,6 +403,7 @@ export class OpenLibraryService {
         isbn_10?: string[];
         isbn_13?: string[];
         oclc_numbers?: string[];
+        lccn?: string[];
         lc_classifications?: string[];
         number_of_pages?: number;
         description?: unknown;
@@ -343,21 +420,17 @@ export class OpenLibraryService {
         );
       }
 
-      // Resolve author names via parallel secondary lookups
-      const authors: Array<{ name: string; author_id?: string }> = await Promise.all(
-        (raw.authors ?? []).map(async (authorRef) => {
-          const authorId = stripPrefix(authorRef.key, '/authors/');
-          try {
-            const authorRaw = await this.fetch<{ name?: string }>(
-              `${BASE_URL}/authors/${authorId}.json`,
-              ctx,
-            );
-            return { name: authorRaw.name ?? authorId, author_id: authorId };
-          } catch {
-            return { author_id: authorId, name: authorId };
-          }
-        }),
+      // Resolve author names via parallel secondary lookups, falling back to the
+      // parent work when the edition itself records no authors.
+      let authors = await this.resolveAuthors(
+        (raw.authors ?? []).map((authorRef) => authorRef.key),
+        'edition',
+        ctx,
       );
+      if (authors.length === 0) {
+        const workKeys = await this.workAuthorKeys(raw.works?.[0]?.key, ctx);
+        authors = await this.resolveAuthors(workKeys, 'work', ctx);
+      }
 
       const editionId = stripPrefix(raw.key, '/books/');
       const edDesc = extractDescription(raw.description);
@@ -371,7 +444,8 @@ export class OpenLibraryService {
         isbn_10: raw.isbn_10 ?? [],
         isbn_13: raw.isbn_13 ?? [],
         oclc: raw.oclc_numbers ?? [],
-        lccn: raw.lc_classifications ?? [],
+        lccn: raw.lccn ?? [],
+        lc_classifications: raw.lc_classifications ?? [],
         ...(typeof raw.number_of_pages === 'number' && { page_count: raw.number_of_pages }),
         ...(edDesc !== undefined ? { description: edDesc } : {}),
         cover_ids: raw.covers ?? [],
@@ -398,6 +472,7 @@ export class OpenLibraryService {
             isbn_10?: string[];
             isbn_13?: string[];
             oclc_numbers?: string[];
+            lccn?: string[];
             lc_classifications?: string[];
             number_of_pages?: number;
             description?: unknown;
@@ -418,10 +493,17 @@ export class OpenLibraryService {
     }
 
     const d = entry.details;
-    const authors: Array<{ name: string; author_id?: string }> = (d.authors ?? []).map((a) => ({
+    // This route embeds author names inline; only the work-level fallback needs
+    // secondary lookups.
+    let authors: EditionAuthor[] = (d.authors ?? []).map((a) => ({
       name: a.name ?? stripPrefix(a.key, '/authors/'),
       author_id: stripPrefix(a.key, '/authors/'),
+      source: 'edition',
     }));
+    if (authors.length === 0) {
+      const workKeys = await this.workAuthorKeys(d.works?.[0]?.key, ctx);
+      authors = await this.resolveAuthors(workKeys, 'work', ctx);
+    }
 
     const oclcDesc = extractDescription(d.description);
     return {
@@ -434,7 +516,8 @@ export class OpenLibraryService {
       isbn_10: d.isbn_10 ?? [],
       isbn_13: d.isbn_13 ?? [],
       oclc: d.oclc_numbers ?? [],
-      lccn: d.lc_classifications ?? [],
+      lccn: d.lccn ?? [],
+      lc_classifications: d.lc_classifications ?? [],
       ...(typeof d.number_of_pages === 'number' && { page_count: d.number_of_pages }),
       ...(oclcDesc !== undefined ? { description: oclcDesc } : {}),
       cover_ids: d.covers ?? [],

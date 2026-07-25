@@ -4,6 +4,8 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { normalizeLanguageCode } from '@/services/open-library/language-codes.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 /**
@@ -45,9 +47,10 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .describe('Find works that have editions with this ISBN (10 or 13 digits, hyphens ignored).'),
     language: z
       .string()
+      .regex(/^[A-Za-z]{2,3}$/)
       .optional()
       .describe(
-        'Two-letter ISO 639-1 language code (e.g., "en", "fr"). Influences but does not exclude results; use language:fr in query to hard-filter.',
+        'Restrict results to one language. Takes a 3-letter MARC code (e.g., "eng", "fre", "ger", "chi") — the same vocabulary openlibrary_get_edition and openlibrary_get_editions return. A 2-letter ISO 639-1 code (e.g., "en", "fr") is accepted and translated to its MARC equivalent; an unrecognized 2-letter code is rejected rather than silently ignored. The equivalent in-query form is language:eng.',
       ),
     sort: z
       .enum(['relevance', 'new', 'old', 'rating', 'editions'])
@@ -105,9 +108,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
               .optional()
               .describe('Up to 5 subject tags. Absent when no subjects are tagged.'),
             ebook_access: z
-              .enum(['no_ebook', 'printdisabled', 'borrowable', 'public'])
+              .enum(['no_ebook', 'unclassified', 'printdisabled', 'borrowable', 'public'])
               .describe(
-                '"public" = freely readable. "borrowable" = borrow on Internet Archive. "printdisabled" = access for print-disabled users. "no_ebook" = no digital version.',
+                '"public" = freely readable. "borrowable" = borrow on Internet Archive. "printdisabled" = access for print-disabled users. "no_ebook" = no digital version. "unclassified" = a digital copy may exist but its access tier is not recorded.',
               ),
             has_fulltext: z
               .boolean()
@@ -146,6 +149,15 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       )
       .describe('Matching works, up to limit.'),
   }),
+  errors: [
+    {
+      reason: 'unknown_language_code',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A 2-letter language value has no MARC equivalent, so no filter could be applied.',
+      recovery:
+        'Pass a 3-letter MARC language code such as "eng", "fre", "ger", or "spa" instead of the unrecognized value.',
+    },
+  ],
 
   /** Agent-facing context: the parsed query echo, total count, and empty-result notice. */
   enrichment: {
@@ -188,7 +200,11 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     if (input.subject) filters.push(`subject "${input.subject}"`);
     if (input.publisher) filters.push(`publisher "${input.publisher}"`);
     if (input.isbn) filters.push(`isbn "${input.isbn}"`);
-    if (input.language) filters.push(`language "${input.language}"`);
+    // Echo the MARC code actually sent upstream, not the caller's input — an echo
+    // asserting a filter value that was never applied is worse than no echo. The
+    // service already normalized (and rejected unmappable codes) above, so this
+    // lookup cannot throw here.
+    if (input.language) filters.push(`language "${normalizeLanguageCode(input.language)}"`);
     const queryEcho = filters.length > 1 ? filters.join(', ') : undefined;
 
     if (result.works.length === 0) {

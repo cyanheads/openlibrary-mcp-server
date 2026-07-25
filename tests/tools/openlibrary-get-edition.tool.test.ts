@@ -12,14 +12,16 @@ import { initOpenLibraryService } from '@/services/open-library/open-library-ser
 const FULL_EDITION = {
   edition_id: 'OL7353617M',
   title: 'The Great Gatsby',
-  authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A' }],
+  authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A', source: 'edition' as const }],
   publish_date: '1953',
   publishers: ['Scribner'],
   language: 'eng',
   isbn_10: ['0743273567'],
   isbn_13: ['9780743273565'],
   oclc: ['36863723'],
+  /** Control number and call number are deliberately distinct — see issue #16. */
   lccn: ['00027665'],
+  lc_classifications: ['PS3511.I9 G7 1953'],
   page_count: 180,
   description: 'A novel about the Roaring Twenties.',
   cover_ids: [9255566],
@@ -96,6 +98,26 @@ describe('openlibraryGetEdition', () => {
     expect(text).toContain('https://archive.org/details/greatgatsby00fitz');
   });
 
+  it('renders the control number and the call number as separate, differently-labelled fields', () => {
+    const text = (openlibraryGetEdition.format!(FULL_EDITION)[0] as { text: string }).text;
+    expect(text).toContain('**LCCN:** 00027665');
+    expect(text).toContain('**LC call number:** PS3511.I9 G7 1953');
+    // The call number must never be presented as the lookupable identifier.
+    expect(text).not.toContain('**LCCN:** PS3511.I9 G7 1953');
+  });
+
+  it('labels work-level attribution rather than presenting it as edition data', () => {
+    const workSourced = {
+      ...FULL_EDITION,
+      authors: [{ name: 'George Orwell', author_id: 'OL273387A', source: 'work' as const }],
+    };
+    const text = (openlibraryGetEdition.format!(workSourced)[0] as { text: string }).text;
+    expect(text).toContain('George Orwell');
+    expect(text).toContain('from parent work');
+    // Must not be rendered under the plain edition-authors heading.
+    expect(text).not.toContain('**Authors:** George Orwell');
+  });
+
   it('formats sparse edition (no optional fields)', () => {
     const sparse = {
       edition_id: 'OL1M',
@@ -106,6 +128,7 @@ describe('openlibraryGetEdition', () => {
       isbn_13: [],
       oclc: [],
       lccn: [],
+      lc_classifications: [],
       cover_ids: [],
     };
     const text = (openlibraryGetEdition.format!(sparse)[0] as { text: string }).text;

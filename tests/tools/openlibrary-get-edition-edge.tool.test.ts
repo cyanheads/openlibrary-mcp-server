@@ -12,14 +12,16 @@ import { initOpenLibraryService } from '@/services/open-library/open-library-ser
 const FULL_EDITION = {
   edition_id: 'OL7353617M',
   title: 'The Great Gatsby',
-  authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A' }],
+  authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A', source: 'edition' as const }],
   publish_date: '1953',
   publishers: ['Scribner'],
   language: 'eng',
   isbn_10: ['0743273567'],
   isbn_13: ['9780743273565'],
   oclc: ['36863723'],
+  /** Control number and call number are deliberately distinct — see issue #16. */
   lccn: ['00027665'],
+  lc_classifications: ['PS3511.I9 G7 1953'],
   page_count: 180,
   description: 'A novel about the Roaring Twenties.',
   cover_ids: [9255566],
@@ -196,11 +198,26 @@ describe('openlibraryGetEdition — edge cases', () => {
   it('formats edition with author without author_id', () => {
     const edition = {
       ...FULL_EDITION,
-      authors: [{ name: 'Anonymous Author' }],
+      authors: [{ name: 'Anonymous Author', source: 'edition' as const }],
     };
     const text = (openlibraryGetEdition.format!(edition)[0] as { text: string }).text;
     expect(text).toContain('Anonymous Author');
     // Should not show parenthetical ID
+    expect(text).not.toContain('undefined');
+  });
+
+  it('formats an edition mixing edition-level and work-level attribution', () => {
+    const edition = {
+      ...FULL_EDITION,
+      authors: [
+        { name: 'Edition Credit', author_id: 'OL1A', source: 'edition' as const },
+        { name: 'Work Credit', author_id: 'OL2A', source: 'work' as const },
+      ],
+    };
+    const text = (openlibraryGetEdition.format!(edition)[0] as { text: string }).text;
+    expect(text).toContain('**Authors:** Edition Credit (OL1A)');
+    expect(text).toContain('from parent work');
+    expect(text).toContain('Work Credit (OL2A)');
     expect(text).not.toContain('undefined');
   });
 
@@ -220,6 +237,7 @@ describe('openlibraryGetEdition — edge cases', () => {
       isbn_13: [],
       oclc: [],
       lccn: [],
+      lc_classifications: [],
       cover_ids: [],
     };
     const text = (openlibraryGetEdition.format!(sparse)[0] as { text: string }).text;

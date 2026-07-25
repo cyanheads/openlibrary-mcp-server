@@ -13,7 +13,7 @@ export type SearchWork = {
   edition_count: number;
   cover_id?: number;
   subjects?: string[];
-  ebook_access: 'no_ebook' | 'printdisabled' | 'borrowable' | 'public';
+  ebook_access: 'no_ebook' | 'unclassified' | 'printdisabled' | 'borrowable' | 'public';
   has_fulltext: boolean;
   ratings_average?: number;
   /** Present when include_availability is true; null when work has no IA item. */
@@ -63,11 +63,23 @@ export type EditionSummary = {
   work_id?: string;
 };
 
+/**
+ * An author credited on an edition. `source` records where the attribution came
+ * from: `'edition'` when the edition record itself lists the author, `'work'`
+ * when it was recovered from the parent work (Open Library records authorship at
+ * the work level for many editions).
+ */
+export type EditionAuthor = {
+  name: string;
+  author_id?: string | undefined;
+  source: 'edition' | 'work';
+};
+
 /** Full edition detail. */
 export type EditionDetail = {
   edition_id: string;
   title: string;
-  authors: Array<{ name: string; author_id?: string | undefined }>;
+  authors: EditionAuthor[];
   publish_date?: string | undefined;
   publishers: string[];
   language?: string | undefined;
@@ -75,6 +87,7 @@ export type EditionDetail = {
   isbn_13: string[];
   oclc: string[];
   lccn: string[];
+  lc_classifications: string[];
   page_count?: number | undefined;
   description?: string | undefined;
   cover_ids: number[];

@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "openlibrary-mcp-server",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

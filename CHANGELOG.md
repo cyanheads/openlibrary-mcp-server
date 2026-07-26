@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-26
+
+Fix empty-title and empty-name markdown headings rendering as bare heading markers across eight tools, via a shared placeholder module.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-26
 
 Fix -1/0 cover and photo ID sentinels leaking into cover_ids/photo_ids, and follow Open Library's author merge redirects instead of reporting a valid author as not_found.

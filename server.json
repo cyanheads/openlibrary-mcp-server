@@ -12,14 +12,14 @@
       "url": "https://openlibrary.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.2.2",
+  "version": "0.2.3",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openlibrary-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "packageArguments": [
         {
           "type": "positional",
@@ -48,7 +48,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openlibrary-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "packageArguments": [
         {
           "type": "positional",

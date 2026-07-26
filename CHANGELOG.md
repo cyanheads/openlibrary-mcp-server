@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.20](changelog/0.1.x/0.1.20.md) — 2026-07-26
+
+search_books and search_authors now report the true upstream match count on an over-paged empty page instead of 0; search_books structuredContent carries every subject tag instead of capping at 5; every declared error recovery hint now reaches the client; get_subject drops a dead not_found contract and its no-op case guidance.
+
 ## [0.1.19](changelog/0.1.x/0.1.19.md) — 2026-07-25
 
 search_books no longer fails a whole page over an unclassified ebook_access tier; get_edition now returns real LCCN control numbers (was call numbers) plus a new lc_classifications field and work-level author fallback; search_books' language filter actually filters now, via Open Library's language= parameter and 3-letter MARC codes.

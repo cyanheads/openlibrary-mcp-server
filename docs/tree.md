@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-07-25 19:08:27
+Generated on: 2026-07-26 09:48:05
 
 ```text
 openlibrary-mcp-server/
@@ -138,16 +138,17 @@ openlibrary-mcp-server/
 │   │   │       ├── openlibrary-author.resource.ts
 │   │   │       └── openlibrary-work.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── openlibrary-get-author-works.tool.ts
-│   │           ├── openlibrary-get-author.tool.ts
-│   │           ├── openlibrary-get-cover-url.tool.ts
-│   │           ├── openlibrary-get-edition.tool.ts
-│   │           ├── openlibrary-get-editions.tool.ts
-│   │           ├── openlibrary-get-subject.tool.ts
-│   │           ├── openlibrary-get-work.tool.ts
-│   │           ├── openlibrary-search-authors.tool.ts
-│   │           └── openlibrary-search-books.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── openlibrary-get-author-works.tool.ts
+│   │       │   ├── openlibrary-get-author.tool.ts
+│   │       │   ├── openlibrary-get-cover-url.tool.ts
+│   │       │   ├── openlibrary-get-edition.tool.ts
+│   │       │   ├── openlibrary-get-editions.tool.ts
+│   │       │   ├── openlibrary-get-subject.tool.ts
+│   │       │   ├── openlibrary-get-work.tool.ts
+│   │       │   ├── openlibrary-search-authors.tool.ts
+│   │       │   └── openlibrary-search-books.tool.ts
+│   │       └── capped-list-notice.ts
 │   ├── services/
 │   │   └── open-library/
 │   │       ├── language-codes.ts

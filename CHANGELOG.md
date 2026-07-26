@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-26 · ⚠️ Breaking
+
+get_edition resolves up to 50 identifiers in one call with partial-success reporting (breaking input/output change); a new search_inside tool finds books by scanned-text passage; get_cover_url validates identifier format before building a URL instead of a confident link to a placeholder image.
+
 ## [0.1.20](changelog/0.1.x/0.1.20.md) — 2026-07-26
 
 search_books and search_authors now report the true upstream match count on an over-paged empty page instead of 0; search_books structuredContent carries every subject tag instead of capping at 5; every declared error recovery hint now reaches the client; get_subject drops a dead not_found contract and its no-op case guidance.

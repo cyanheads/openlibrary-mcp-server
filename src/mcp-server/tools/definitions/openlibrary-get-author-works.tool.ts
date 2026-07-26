@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import {
   getOpenLibraryService,
   normalizeAuthorId,
@@ -100,7 +101,7 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
 
     for (const work of result.works) {
       lines.push('');
-      lines.push(`### ${work.title}`);
+      lines.push(`### ${work.title || NO_TITLE}`);
       lines.push(`**Work ID:** ${work.work_id}`);
       if (work.first_publish_date) lines.push(`**First published:** ${work.first_publish_date}`);
       if (work.cover_ids.length) lines.push(`**Cover IDs:** ${work.cover_ids.join(', ')}`);

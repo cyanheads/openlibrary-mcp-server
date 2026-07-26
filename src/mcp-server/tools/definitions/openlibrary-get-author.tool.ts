@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { NO_NAME } from '@/mcp-server/tools/heading-placeholders.js';
 import {
   getOpenLibraryService,
   normalizeAuthorId,
@@ -93,7 +94,7 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`## ${result.name}`);
+    lines.push(`## ${result.name || NO_NAME}`);
     lines.push(`**Author ID:** ${result.author_id}`);
     if (result.personal_name) lines.push(`**Personal name:** ${result.personal_name}`);
     if (result.fuller_name) lines.push(`**Fuller name:** ${result.fuller_name}`);

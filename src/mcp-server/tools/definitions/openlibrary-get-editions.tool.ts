@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetEditions = tool('openlibrary_get_editions', {
@@ -105,7 +106,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
 
     for (const ed of result.editions) {
       lines.push('');
-      lines.push(`### ${ed.title}`);
+      lines.push(`### ${ed.title || NO_TITLE}`);
       lines.push(`**Edition ID:** ${ed.edition_id}`);
       const meta: string[] = [];
       if (ed.publish_date) meta.push(`Published: ${ed.publish_date}`);

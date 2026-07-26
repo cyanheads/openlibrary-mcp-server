@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 /**
@@ -96,7 +97,7 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`## ${result.title}`);
+    lines.push(`## ${result.title || NO_TITLE}`);
     lines.push(`**Work ID:** ${result.work_id}`);
     if (result.description) {
       lines.push('');

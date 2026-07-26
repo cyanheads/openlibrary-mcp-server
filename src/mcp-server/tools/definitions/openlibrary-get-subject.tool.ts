@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetSubject = tool('openlibrary_get_subject', {
@@ -97,7 +98,7 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
 
     for (const work of result.works) {
       lines.push('');
-      lines.push(`### ${work.title}`);
+      lines.push(`### ${work.title || NO_TITLE}`);
       lines.push(`**Work ID:** ${work.work_id}`);
       if (work.author_names.length) lines.push(`**Authors:** ${work.author_names.join(', ')}`);
       lines.push(`**Editions:** ${work.edition_count}`);

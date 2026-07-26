@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { normalizeLanguageCode } from '@/services/open-library/language-codes.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
@@ -272,7 +273,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
 
     for (const work of result.works) {
       lines.push('');
-      lines.push(`## ${work.title}`);
+      lines.push(`## ${work.title || NO_TITLE}`);
       lines.push(`**Work ID:** ${work.work_id}`);
       if (work.author_names.length) {
         lines.push(

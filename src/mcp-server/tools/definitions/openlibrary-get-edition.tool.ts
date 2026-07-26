@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 import type { EditionIdType } from '@/services/open-library/types.js';
 
@@ -219,7 +220,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       a.author_id ? `${a.name} (${a.author_id})` : a.name;
 
     for (const edition of result.editions) {
-      lines.push(`## ${edition.title}`);
+      lines.push(`## ${edition.title || NO_TITLE}`);
       lines.push(`**Edition ID:** ${edition.edition_id}`);
       const editionAuthors = edition.authors.filter((a) => a.source === 'edition');
       const workAuthors = edition.authors.filter((a) => a.source === 'work');

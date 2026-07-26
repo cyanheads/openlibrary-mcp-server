@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
+import { NO_NAME } from '@/mcp-server/tools/heading-placeholders.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 /**
@@ -124,7 +125,7 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
 
     for (const author of result.authors) {
       lines.push('');
-      lines.push(`## ${author.name}`);
+      lines.push(`## ${author.name || NO_NAME}`);
       lines.push(`**Author ID:** ${author.author_id}`);
       const meta: string[] = [];
       if (author.birth_date) meta.push(`Born: ${author.birth_date}`);

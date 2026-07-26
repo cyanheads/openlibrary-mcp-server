@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-26
+
+Fix -1/0 cover and photo ID sentinels leaking into cover_ids/photo_ids, and follow Open Library's author merge redirects instead of reporting a valid author as not_found.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-26
 
 Adopt mcp-ts-core ^0.11.0: MCPB bundles strip platform-specific native bindings (not just agent docs), check-dependency-specifiers now covers the overrides section, and field-test/canvas skills re-synced.

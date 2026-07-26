@@ -7,7 +7,10 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openlibraryGetCoverUrl } from '@/mcp-server/tools/definitions/openlibrary-get-cover-url.tool.js';
-import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import {
+  getOpenLibraryService,
+  initOpenLibraryService,
+} from '@/services/open-library/open-library-service.js';
 
 /** Invokes a synchronous handler and returns whatever it throws (or undefined). */
 function caught(fn: () => unknown): unknown {
@@ -149,17 +152,68 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
     expect(result.url).toContain('9780743273565');
   });
 
-  it('does NOT strip hyphens from olid identifier', () => {
-    const ctx = createMockContext();
+  // Hyphens are an ISBN convention only — an OLID carrying one is malformed, and
+  // passing it through built a URL that could only ever serve the placeholder.
+  it('rejects a hyphenated OLID rather than passing it through into the URL', () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: 'OL735-3617M',
       id_type: 'olid',
       target: 'book',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
-    // Non-ISBN identifiers pass through unchanged
-    expect(result.url).toContain('OL735-3617M');
+    expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_identifier' },
+    });
+  });
+
+  // ─── Per-id_type format validation ──────────────────────────────────────────
+
+  // The Covers API answers every request with HTTP 200 and a 1×1 placeholder GIF,
+  // so a malformed identifier is indistinguishable from a coverless book once the
+  // URL is built. Each row below produced a confident, permanently-blank URL.
+  it.each([
+    ['abc-not-an-isbn', 'isbn', 'book'],
+    ['notanumber', 'id', 'book'],
+    ['12abc', 'id', 'author'],
+    ['OL24638A', 'olid', 'book'],
+    ['OL7353617M', 'olid', 'author'],
+    ['OL7353617', 'olid', 'book'],
+  ])('rejects %s as an identifier for id_type %s / target %s', (identifier, idType, target) => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+    const input = openlibraryGetCoverUrl.input.parse({ identifier, id_type: idType, target });
+    expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'invalid_identifier',
+        recovery: {
+          hint: openlibraryGetCoverUrl.errors!.find((e) => e.reason === 'invalid_identifier')!
+            .recovery,
+        },
+      },
+    });
+  });
+
+  it('names the shape the identifier was expected to have', () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+    const input = openlibraryGetCoverUrl.input.parse({
+      identifier: 'OL7353617M',
+      id_type: 'olid',
+      target: 'author',
+    });
+    expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
+      message: expect.stringContaining('author OLID ending in A'),
+    });
+  });
+
+  // The service is the enforcement seam for callers that bypass the tool.
+  it('rejects a malformed identifier at the service seam too', () => {
+    const svc = getOpenLibraryService();
+    expect(caught(() => svc.getCoverUrl('abc', 'isbn', 'book', 'M'))).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_identifier' },
+    });
   });
 
   // ─── Invalid enum values rejected by schema ─────────────────────────────────

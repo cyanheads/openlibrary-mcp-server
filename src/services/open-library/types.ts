@@ -146,3 +146,18 @@ export type SubjectWork = {
 
 /** Identifier type for edition lookup. */
 export type EditionIdType = 'isbn' | 'oclc' | 'lccn' | 'olid';
+
+/**
+ * A full-text match inside a scanned Internet Archive book. The index keys on IA
+ * items rather than Open Library works, so `ia_identifier` is the only join back
+ * to the catalogue — it matches the `ia_identifiers` that search results carry.
+ * `title` and `creator` come from the IA item's own metadata, which is sparse:
+ * either can be absent on a real hit.
+ */
+export type InsideMatch = {
+  ia_identifier: string;
+  title?: string | undefined;
+  creator?: string | undefined;
+  snippets: string[];
+  score: number;
+};

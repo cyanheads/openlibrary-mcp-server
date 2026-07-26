@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  coverIdentifierExpectation,
   getOpenLibraryService,
   isUnsafeCoverIdentifier,
 } from '@/services/open-library/open-library-service.js';
@@ -13,13 +14,13 @@ import {
 export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
   title: 'Get Cover URL',
   description:
-    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404. Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected locally before any request. URLs can be embedded in markdown as ![cover](url).',
+    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404 — so the identifier format is validated locally first: "id" must be numeric, "isbn" 10 or 13 digits, "olid" an edition OLID (OL…M) for target "book" and an author OLID (OL…A) for target "author". Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected before any request. URLs can be embedded in markdown as ![cover](url).',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     identifier: z
       .string()
       .describe(
-        'The identifier value. For "id": numeric cover ID from work/edition data. For "isbn": 10 or 13 digits, hyphens stripped. For "olid": edition OLID (OL…M) or author OLID (OL…A) when target is "author".',
+        'The identifier value, validated against id_type before the URL is built. For "id": a numeric cover or photo ID from work/edition/author data. For "isbn": 10 or 13 digits, hyphens optional. For "olid": an edition OLID (OL…M) for target "book", an author OLID (OL…A) for target "author".',
       ),
     id_type: z
       .enum(['id', 'isbn', 'olid'])
@@ -56,8 +57,9 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
     {
       reason: 'invalid_identifier',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The identifier contains path separators, "..", or control characters.',
-      recovery: 'Pass the bare cover ID, photo ID, ISBN, or OLID with no slashes or path segments.',
+      when: 'The identifier contains path separators, "..", or control characters, or does not match the format its id_type expects.',
+      recovery:
+        'Pass a bare identifier with no slashes or path segments, matching its id_type: a numeric ID for "id", 10 or 13 digits for "isbn", OL…M for "olid" with target "book", OL…A for "olid" with target "author".',
     },
     {
       reason: 'invalid_target',
@@ -87,6 +89,16 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
         'invalid_target',
         'Author photos cannot be looked up by ISBN; use id_type "id" or "olid".',
         ctx.recoveryFor('invalid_target'),
+      );
+    }
+    // The Covers API serves a placeholder GIF rather than a 404, so a malformed
+    // identifier is indistinguishable from a missing cover once the URL is built.
+    const expected = coverIdentifierExpectation(input.identifier, input.id_type, input.target);
+    if (expected) {
+      throw ctx.fail(
+        'invalid_identifier',
+        `"${input.identifier}" is not ${expected}.`,
+        ctx.recoveryFor('invalid_identifier'),
       );
     }
     const svc = getOpenLibraryService();

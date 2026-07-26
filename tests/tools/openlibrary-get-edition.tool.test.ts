@@ -7,7 +7,10 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
-import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import {
+  getOpenLibraryService,
+  initOpenLibraryService,
+} from '@/services/open-library/open-library-service.js';
 
 const FULL_EDITION = {
   edition_id: 'OL7353617M',
@@ -29,41 +32,99 @@ const FULL_EDITION = {
   ebook_url: 'https://archive.org/details/greatgatsby00fitz',
 };
 
+const SECOND_EDITION = {
+  ...FULL_EDITION,
+  edition_id: 'OL22855101M',
+  title: 'Concorde',
+  isbn_13: ['9782952690607'],
+};
+
 describe('openlibraryGetEdition', () => {
   beforeEach(() => {
     initOpenLibraryService();
   });
 
-  it('rejects invalid ISBN format', async () => {
+  it('resolves every identifier in the batch, in request order', async () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: 'notanisbn', id_type: 'isbn' });
+    const spy = vi
+      .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
+      .mockResolvedValueOnce({ editions: [FULL_EDITION, SECOND_EDITION], unresolved: [] });
 
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['9780743273565', '9782952690607'],
+      id_type: 'isbn',
+    });
+    const result = await openlibraryGetEdition.handler(input, ctx);
+
+    expect(spy).toHaveBeenCalledWith(['9780743273565', '9782952690607'], 'isbn', ctx);
+    expect(result.editions.map((e) => e.edition_id)).toEqual(['OL7353617M', 'OL22855101M']);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it('returns the resolved editions and reports the misses when the batch is partial', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [FULL_EDITION],
+      unresolved: ['OL99999999M'],
+    });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['OL7353617M', 'OL99999999M', 'not-an-olid'],
+      id_type: 'olid',
+    });
+    const result = await openlibraryGetEdition.handler(input, ctx);
+
+    expect(result.editions).toHaveLength(1);
+    expect(result.unresolved).toEqual([
+      { identifier: 'not-an-olid', reason: 'invalid_identifier' },
+      { identifier: 'OL99999999M', reason: 'not_found' },
+    ]);
+  });
+
+  it('never sends a malformed identifier upstream', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const spy = vi
+      .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
+      .mockResolvedValueOnce({ editions: [FULL_EDITION], unresolved: [] });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['9780743273565', 'notanisbn'],
+      id_type: 'isbn',
+    });
+    await openlibraryGetEdition.handler(input, ctx);
+
+    expect(spy).toHaveBeenCalledWith(['9780743273565'], 'isbn', ctx);
+  });
+
+  it('throws not_found when nothing in the batch resolved', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [],
+      unresolved: ['OL99999998M', 'OL99999999M'],
+    });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['OL99999998M', 'OL99999999M'],
+      id_type: 'olid',
+    });
     await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 
-  it('rejects invalid OLID format', async () => {
+  // A batch of nothing but malformed values never reached upstream, so reporting
+  // it as not-found would point the caller at the wrong correction.
+  it('throws invalid_identifier — not not_found — when every identifier is malformed', async () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OL1234', id_type: 'olid' });
+    const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers');
 
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['notanisbn', '12345'],
+      id_type: 'isbn',
     });
-  });
-
-  // Each id_type validates in its own branch, so the declared hint has to be
-  // attached at all three throw sites — not just whichever one a test happens
-  // to exercise.
-  it.each([
-    ['isbn' as const, 'notanisbn'],
-    ['olid' as const, 'OL1234'],
-    ['oclc' as const, 'abc-not-oclc'],
-  ])('delivers the declared invalid_identifier recovery on the %s branch', async (idType, id) => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: id, id_type: idType });
-
     await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'invalid_identifier',
         recovery: {
@@ -72,44 +133,64 @@ describe('openlibraryGetEdition', () => {
         },
       },
     });
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it('returns edition detail for valid ISBN', async () => {
+  it('delivers the declared not_found recovery hint on the wire', async () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [],
+      unresolved: ['OL99999999M'],
+    });
 
     const input = openlibraryGetEdition.input.parse({
-      identifier: '9780743273565',
-      id_type: 'isbn',
+      identifiers: ['OL99999999M'],
+      id_type: 'olid',
     });
+    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        recovery: {
+          hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'not_found')!.recovery,
+        },
+      },
+    });
+  });
+
+  // ─── Batch size ─────────────────────────────────────────────────────────────
+
+  it('accepts a batch at the cap', async () => {
+    const identifiers = Array.from({ length: 50 }, (_, i) => `OL${7353617 + i}M`);
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const spy = vi
+      .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
+      .mockResolvedValueOnce({
+        editions: identifiers.map((id) => ({ ...FULL_EDITION, edition_id: id })),
+        unresolved: [],
+      });
+
+    const input = openlibraryGetEdition.input.parse({ identifiers, id_type: 'olid' });
     const result = await openlibraryGetEdition.handler(input, ctx);
 
-    expect(result.edition_id).toBe('OL7353617M');
-    expect(result.work_id).toBe('OL45804W');
-    expect(result.authors[0]!.name).toBe('F. Scott Fitzgerald');
+    expect(spy.mock.calls[0]?.[0]).toHaveLength(50);
+    expect(result.editions).toHaveLength(50);
   });
 
-  it('throws not_found for missing edition', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    vi.spyOn(svc, 'getEditionByIdentifier').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Edition not found',
-    });
-
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OL9999M', id_type: 'olid' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-    });
+  it('rejects a batch past the cap at the schema', () => {
+    const identifiers = Array.from({ length: 51 }, (_, i) => `OL${7353617 + i}M`);
+    expect(() => openlibraryGetEdition.input.parse({ identifiers, id_type: 'olid' })).toThrow();
   });
+
+  it('rejects an empty identifiers array at the schema', () => {
+    expect(() => openlibraryGetEdition.input.parse({ identifiers: [], id_type: 'isbn' })).toThrow();
+  });
+
+  // ─── format() ───────────────────────────────────────────────────────────────
 
   it('formats edition with all fields', () => {
-    const blocks = openlibraryGetEdition.format!(FULL_EDITION);
+    const blocks = openlibraryGetEdition.format!({
+      editions: [FULL_EDITION],
+      unresolved: [],
+    });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('OL7353617M');
     expect(text).toContain('The Great Gatsby');
@@ -120,8 +201,38 @@ describe('openlibraryGetEdition', () => {
     expect(text).toContain('https://archive.org/details/greatgatsby00fitz');
   });
 
+  it('renders every edition in a multi-result batch, not just the first', () => {
+    const text = (
+      openlibraryGetEdition.format!({
+        editions: [FULL_EDITION, SECOND_EDITION],
+        unresolved: [],
+      })[0] as { text: string }
+    ).text;
+    expect(text).toContain('The Great Gatsby');
+    expect(text).toContain('Concorde');
+    expect(text).toContain('OL22855101M');
+  });
+
+  it('renders unresolved identifiers with their reason so a miss is visible in text', () => {
+    const text = (
+      openlibraryGetEdition.format!({
+        editions: [FULL_EDITION],
+        unresolved: [
+          { identifier: 'OL99999999M', reason: 'not_found' },
+          { identifier: 'nope', reason: 'invalid_identifier' },
+        ],
+      })[0] as { text: string }
+    ).text;
+    expect(text).toContain('OL99999999M — not_found');
+    expect(text).toContain('nope — invalid_identifier');
+  });
+
   it('renders the control number and the call number as separate, differently-labelled fields', () => {
-    const text = (openlibraryGetEdition.format!(FULL_EDITION)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [FULL_EDITION], unresolved: [] })[0] as {
+        text: string;
+      }
+    ).text;
     expect(text).toContain('**LCCN:** 00027665');
     expect(text).toContain('**LC call number:** PS3511.I9 G7 1953');
     // The call number must never be presented as the lookupable identifier.
@@ -133,7 +244,11 @@ describe('openlibraryGetEdition', () => {
       ...FULL_EDITION,
       authors: [{ name: 'George Orwell', author_id: 'OL273387A', source: 'work' as const }],
     };
-    const text = (openlibraryGetEdition.format!(workSourced)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [workSourced], unresolved: [] })[0] as {
+        text: string;
+      }
+    ).text;
     expect(text).toContain('George Orwell');
     expect(text).toContain('from parent work');
     // Must not be rendered under the plain edition-authors heading.
@@ -153,7 +268,9 @@ describe('openlibraryGetEdition', () => {
       lc_classifications: [],
       cover_ids: [],
     };
-    const text = (openlibraryGetEdition.format!(sparse)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [] })[0] as { text: string }
+    ).text;
     expect(text).toContain('OL1M');
   });
 });

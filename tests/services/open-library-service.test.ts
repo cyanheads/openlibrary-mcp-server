@@ -20,6 +20,7 @@ import { openlibraryAuthorResource } from '@/mcp-server/resources/definitions/op
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
 import {
+  EDITION_ENRICHMENT_CONCURRENCY,
   getOpenLibraryService,
   initOpenLibraryService,
 } from '@/services/open-library/open-library-service.js';
@@ -113,27 +114,29 @@ describe('OpenLibraryService — upstream 404 handling', () => {
     ).resolves.toBeNull();
   });
 
-  // ─── getEditionByIdentifier throws a tagged not_found ───────────────────────
+  // ─── Unmatched bibkeys come back as unresolved, not as a throw ──────────────
 
-  it('getEditionByIdentifier throws not_found with data.reason on a 404 (isbn branch)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(notFoundResponse());
-    const svc = getOpenLibraryService();
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-
-    const error = await svc.getEditionByIdentifier('9780000000000', 'isbn', ctx).catch((e) => e);
-    expect(error).toBeInstanceOf(McpError);
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
-    });
-  });
-
-  it('getEditionByIdentifier throws not_found with data.reason for an unmatched OCLC (200 {})', async () => {
+  // Open Library omits an unresolvable bibkey from the response map entirely, so
+  // the whole batch can come back as `{}` with HTTP 200.
+  it('getEditionsByIdentifiers reports every unmatched identifier rather than throwing (200 {})', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(emptyOkResponse());
     const svc = getOpenLibraryService();
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
 
-    const error = await svc.getEditionByIdentifier('99999999', 'oclc', ctx).catch((e) => e);
+    await expect(
+      svc.getEditionsByIdentifiers(['99999999', '88888888'], 'oclc', ctx),
+    ).resolves.toEqual({ editions: [], unresolved: ['99999999', '88888888'] });
+  });
+
+  it('surfaces the batch not_found contract through the get_edition tool', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(emptyOkResponse());
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['9780000000000'],
+      id_type: 'isbn',
+    });
+
+    const error = await openlibraryGetEdition.handler(input, ctx).catch((e) => e);
     expect(error).toBeInstanceOf(McpError);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
@@ -387,12 +390,12 @@ describe('OpenLibraryService — getSubject', () => {
   });
 });
 
-describe('OpenLibraryService — edition identifier and author mapping', () => {
+describe('OpenLibraryService — edition batch mapping', () => {
   /** OL22855101M — a real record whose lccn and lc_classifications differ. */
   const CONCORDE = {
     key: '/books/OL22855101M',
     title: 'Concorde',
-    authors: [{ key: '/authors/OL631509A' }],
+    authors: [{ key: '/authors/OL631509A', name: 'Yves Marc' }],
     works: [{ key: '/works/OL3668495W' }],
     lccn: ['2008478952'],
     lc_classifications: ['TL685.7 .M366 2008'],
@@ -407,90 +410,124 @@ describe('OpenLibraryService — edition identifier and author mapping', () => {
     vi.restoreAllMocks();
   });
 
-  it('maps lccn from the upstream lccn field and call numbers to lc_classifications (isbn/olid route)', async () => {
-    mockFetchRoutes({
-      '/books/OL22855101M.json': CONCORDE,
-      '/authors/OL631509A.json': { name: 'Yves Marc' },
-    });
+  it('maps lccn from the upstream lccn field and call numbers to lc_classifications', async () => {
+    mockFetchRoutes({ '/api/books': { 'OLID:OL22855101M': { details: CONCORDE } } });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      'OL22855101M',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL22855101M'],
       'olid',
       createMockContext(),
     );
 
     // The control number is the lookupable identifier; the call number is not.
-    expect(edition.lccn).toEqual(['2008478952']);
-    expect(edition.lc_classifications).toEqual(['TL685.7 .M366 2008']);
-    expect(edition.oclc).toEqual(['244767413']);
+    expect(editions[0]?.lccn).toEqual(['2008478952']);
+    expect(editions[0]?.lc_classifications).toEqual(['TL685.7 .M366 2008']);
+    expect(editions[0]?.oclc).toEqual(['244767413']);
   });
 
-  it('maps lccn from the upstream lccn field on the oclc/lccn route too', async () => {
-    mockFetchRoutes({
-      '/api/books': {
-        'LCCN:2008478952': {
-          details: { ...CONCORDE, authors: [{ key: '/authors/OL631509A', name: 'Yves Marc' }] },
-        },
-      },
-    });
+  it.each([
+    ['isbn' as const, '9782952690607', 'ISBN:9782952690607'],
+    ['oclc' as const, '244767413', 'OCLC:244767413'],
+    ['lccn' as const, '2008478952', 'LCCN:2008478952'],
+    ['olid' as const, 'OL22855101M', 'OLID:OL22855101M'],
+  ])('builds the %s bibkey prefix upstream', async (idType, identifier, bibkey) => {
+    const fetchSpy = mockFetchRoutes({ '/api/books': { [bibkey]: { details: CONCORDE } } });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      '2008478952',
-      'lccn',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      [identifier],
+      idType,
       createMockContext(),
     );
 
-    expect(edition.lccn).toEqual(['2008478952']);
-    expect(edition.lc_classifications).toEqual(['TL685.7 .M366 2008']);
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain(encodeURIComponent(bibkey));
+    expect(editions).toHaveLength(1);
   });
 
-  it('tags edition-level authors with source "edition"', async () => {
-    mockFetchRoutes({
-      '/books/OL22855101M.json': CONCORDE,
-      '/authors/OL631509A.json': { name: 'Yves Marc' },
+  it('strips ISBN hyphens for the bibkey while echoing the identifier as supplied', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': { 'ISBN:9780743273565': { details: CONCORDE } },
     });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      'OL22855101M',
-      'olid',
-      createMockContext(),
-    );
-
-    expect(edition.authors).toEqual([
-      { name: 'Yves Marc', author_id: 'OL631509A', source: 'edition' },
-    ]);
-  });
-
-  it('falls back to the parent work when the edition records no authors (isbn/olid route)', async () => {
-    // OL34854896M — authors is null upstream; authorship lives on OL1168083W.
-    mockFetchRoutes({
-      '/isbn/9780451524935.json': {
-        key: '/books/OL34854896M',
-        title: 'Nineteen Eighty-Four',
-        authors: null,
-        works: [{ key: '/works/OL1168083W' }],
-      },
-      '/works/OL1168083W.json': {
-        authors: [{ author: { key: '/authors/OL118077A' }, type: { key: '/type/author_role' } }],
-      },
-      '/authors/OL118077A.json': { name: 'George Orwell' },
-    });
-
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      '9780451524935',
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['978-0-7432-7356-5'],
       'isbn',
       createMockContext(),
     );
 
-    expect(edition.authors).toEqual([
-      { name: 'George Orwell', author_id: 'OL118077A', source: 'work' },
-    ]);
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain('ISBN%3A9780743273565');
+    expect(editions).toHaveLength(1);
+    expect(unresolved).toEqual([]);
   });
 
-  it('falls back to the parent work on the oclc/lccn route as well', async () => {
+  it('resolves the whole batch in one request, in request order', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': {
+        'OLID:OL1M': { details: { key: '/books/OL1M', title: 'First' } },
+        'OLID:OL2M': { details: { key: '/books/OL2M', title: 'Second' } },
+      },
+    });
+
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL2M', 'OL1M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(editions.map((e) => e.edition_id)).toEqual(['OL2M', 'OL1M']);
+  });
+
+  // An unresolvable bibkey is omitted from the response map entirely — no null,
+  // no error entry — so a missing key is the only not-found signal.
+  it('reports the identifiers upstream omitted without dropping the ones it returned', async () => {
+    mockFetchRoutes({
+      '/api/books': { 'OLID:OL1M': { details: { key: '/books/OL1M', title: 'First' } } },
+    });
+
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL1M', 'OL99999999M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions.map((e) => e.edition_id)).toEqual(['OL1M']);
+    expect(unresolved).toEqual(['OL99999999M']);
+  });
+
+  it('treats an entry with no key as unresolved rather than an empty edition', async () => {
+    mockFetchRoutes({ '/api/books': { 'OLID:OL1M': { details: { title: 'Keyless' } } } });
+
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL1M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions).toEqual([]);
+    expect(unresolved).toEqual(['OL1M']);
+  });
+
+  it('tags inline author names with source "edition" and needs no secondary lookup', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': { 'OLID:OL22855101M': { details: CONCORDE } },
+    });
+
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL22855101M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([
+      { name: 'Yves Marc', author_id: 'OL631509A', source: 'edition' },
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the parent work when the edition records no authors', async () => {
     mockFetchRoutes({
       '/api/books': {
-        'OCLC:12345678': {
+        'ISBN:9780451524935': {
           details: {
             key: '/books/OL34854896M',
             title: 'Nineteen Eighty-Four',
@@ -499,70 +536,200 @@ describe('OpenLibraryService — edition identifier and author mapping', () => {
         },
       },
       '/works/OL1168083W.json': {
-        authors: [{ author: { key: '/authors/OL118077A' } }],
+        authors: [{ author: { key: '/authors/OL118077A' }, type: { key: '/type/author_role' } }],
       },
       '/authors/OL118077A.json': { name: 'George Orwell' },
     });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      '12345678',
-      'oclc',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['9780451524935'],
+      'isbn',
       createMockContext(),
     );
 
-    expect(edition.authors).toEqual([
+    expect(editions[0]?.authors).toEqual([
       { name: 'George Orwell', author_id: 'OL118077A', source: 'work' },
     ]);
   });
 
   it('returns no authors, and no error, when neither the edition nor its work has any', async () => {
     mockFetchRoutes({
-      '/books/OL999M.json': {
-        key: '/books/OL999M',
-        title: 'Anonymous Pamphlet',
-        works: [{ key: '/works/OL999W' }],
+      '/api/books': {
+        'OLID:OL999M': {
+          details: {
+            key: '/books/OL999M',
+            title: 'Anonymous Pamphlet',
+            works: [{ key: '/works/OL999W' }],
+          },
+        },
       },
       '/works/OL999W.json': { key: '/works/OL999W', title: 'Anonymous Pamphlet' },
     });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      'OL999M',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL999M'],
       'olid',
       createMockContext(),
     );
 
-    expect(edition.authors).toEqual([]);
+    expect(editions[0]?.authors).toEqual([]);
   });
 
   it('returns no authors when the edition has none and no parent work to fall back to', async () => {
     mockFetchRoutes({
-      '/books/OL998M.json': { key: '/books/OL998M', title: 'Orphan Edition' },
+      '/api/books': {
+        'OLID:OL998M': { details: { key: '/books/OL998M', title: 'Orphan Edition' } },
+      },
     });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      'OL998M',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL998M'],
       'olid',
       createMockContext(),
     );
 
-    expect(edition.authors).toEqual([]);
-    expect(edition.work_id).toBeUndefined();
+    expect(editions[0]?.authors).toEqual([]);
+    expect(editions[0]?.work_id).toBeUndefined();
   });
 
-  it('keeps the credit with the author ID as its name when the author lookup fails', async () => {
+  it('keeps the credit with the author ID as its name when a work-level lookup fails', async () => {
     mockFetchRoutes({
-      '/books/OL22855101M.json': CONCORDE,
+      '/api/books': {
+        'OLID:OL22855101M': {
+          details: { ...CONCORDE, authors: undefined },
+        },
+      },
+      '/works/OL3668495W.json': { authors: [{ author: { key: '/authors/OL631509A' } }] },
       // /authors/OL631509A.json is unrouted and 404s.
     });
 
-    const edition = await getOpenLibraryService().getEditionByIdentifier(
-      'OL22855101M',
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL22855101M'],
       'olid',
       createMockContext(),
     );
 
-    expect(edition.authors).toEqual([
-      { name: 'OL631509A', author_id: 'OL631509A', source: 'edition' },
+    expect(editions[0]?.authors).toEqual([
+      { name: 'OL631509A', author_id: 'OL631509A', source: 'work' },
     ]);
+  });
+});
+
+describe('OpenLibraryService — edition batch enrichment concurrency', () => {
+  /**
+   * Enough editions that the ungated fan-out is unmistakable: none carry inline
+   * authors, so each costs a work lookup plus one lookup per author credit —
+   * 30 + 90 follow-up requests, every one of them previously issued in the same
+   * tick off a single `Promise.all`.
+   */
+  const EDITION_COUNT = 30;
+  const AUTHORS_PER_WORK = 3;
+
+  /** Bibkey map plus the work/author records the enrichment path walks to. */
+  function batchFixture() {
+    const identifiers: string[] = [];
+    const bibkeys: Record<string, unknown> = {};
+    const routes: Record<string, unknown> = {};
+
+    for (let i = 0; i < EDITION_COUNT; i++) {
+      const editionId = `OL${1000 + i}M`;
+      const workId = `OL${2000 + i}W`;
+      const authorIds = Array.from(
+        { length: AUTHORS_PER_WORK },
+        (_, a) => `OL${3000 + i * AUTHORS_PER_WORK + a}A`,
+      );
+
+      identifiers.push(editionId);
+      bibkeys[`OLID:${editionId}`] = {
+        details: {
+          key: `/books/${editionId}`,
+          title: `Title ${i}`,
+          works: [{ key: `/works/${workId}` }],
+        },
+      };
+      routes[`/works/${workId}.json`] = {
+        authors: authorIds.map((id) => ({ author: { key: `/authors/${id}` } })),
+      };
+      for (const id of authorIds) {
+        routes[`/authors/${id}.json`] = { name: `Author ${id}` };
+      }
+    }
+
+    return { identifiers, routes: { '/api/books': bibkeys, ...routes } };
+  }
+
+  /**
+   * Routes like `mockFetchRoutes`, but records how many requests are in flight
+   * at once. Each response is deferred past the current macrotask so overlapping
+   * requests genuinely overlap rather than each settling before the next is
+   * issued.
+   */
+  function trackingFetchRoutes(routes: Record<string, unknown>) {
+    const tracker = { inFlight: 0, peak: 0 };
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: unknown) => {
+      tracker.inFlight++;
+      tracker.peak = Math.max(tracker.peak, tracker.inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        const url = requestUrl(input);
+        for (const [fragment, body] of Object.entries(routes)) {
+          if (url.includes(fragment)) {
+            return new Response(JSON.stringify(body), { status: 200 });
+          }
+        }
+        return notFoundResponse();
+      } finally {
+        tracker.inFlight--;
+      }
+    }) as typeof globalThis.fetch);
+
+    return tracker;
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('never exceeds the enrichment concurrency cap against Open Library', async () => {
+    const { identifiers, routes } = batchFixture();
+    const tracker = trackingFetchRoutes(routes);
+
+    await getOpenLibraryService().getEditionsByIdentifiers(
+      identifiers,
+      'olid',
+      createMockContext(),
+    );
+
+    // Ungated, the peak is one request per edition (and later per author credit)
+    // — an order of magnitude past the cap.
+    expect(tracker.peak).toBeLessThanOrEqual(EDITION_ENRICHMENT_CONCURRENCY);
+    // …but the cap must bound the fan-out, not flatten it into serial requests.
+    expect(tracker.peak).toBeGreaterThan(1);
+  });
+
+  it('resolves every edition, in request order, with its work-level authors', async () => {
+    const { identifiers, routes } = batchFixture();
+    trackingFetchRoutes(routes);
+
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      identifiers,
+      'olid',
+      createMockContext(),
+    );
+
+    expect(unresolved).toEqual([]);
+    expect(editions.map((e) => e.edition_id)).toEqual(identifiers);
+    for (const edition of editions) {
+      expect(edition.authors).toHaveLength(AUTHORS_PER_WORK);
+      expect(edition.authors.every((a) => a.source === 'work')).toBe(true);
+      expect(edition.authors.map((a) => a.name)).toEqual(
+        edition.authors.map((a) => `Author ${a.author_id}`),
+      );
+    }
   });
 });

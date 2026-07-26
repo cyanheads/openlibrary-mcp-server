@@ -16,16 +16,18 @@ import { openlibraryGetSubject } from './mcp-server/tools/definitions/openlibrar
 import { openlibraryGetWork } from './mcp-server/tools/definitions/openlibrary-get-work.tool.js';
 import { openlibrarySearchAuthors } from './mcp-server/tools/definitions/openlibrary-search-authors.tool.js';
 import { openlibrarySearchBooks } from './mcp-server/tools/definitions/openlibrary-search-books.tool.js';
+import { openlibrarySearchInside } from './mcp-server/tools/definitions/openlibrary-search-inside.tool.js';
 import { initOpenLibraryService } from './services/open-library/open-library-service.js';
 
 await createApp({
   name: 'openlibrary-mcp-server',
   title: 'openlibrary-mcp-server',
   instructions:
-    'Use the openlibrary_* tools to search books, editions, authors, and subjects via Open Library. No API key required. IDs are typed by suffix — works OL…W, editions OL…M, authors OL…A — and editions also resolve by ISBN. Canonical flow: openlibrary_search_books → openlibrary_get_work → openlibrary_get_editions/openlibrary_get_edition; for people, openlibrary_search_authors → openlibrary_get_author. Resolve cover/photo IDs with openlibrary_get_cover_url — it always returns HTTP 200, so a missing image is a 1×1 placeholder GIF, not an error.',
+    'Use the openlibrary_* tools to search books, editions, authors, and subjects via Open Library. No API key required. IDs are typed by suffix — works OL…W, editions OL…M, authors OL…A — and editions also resolve by ISBN. Canonical flow: openlibrary_search_books → openlibrary_get_work → openlibrary_get_editions/openlibrary_get_edition; for people, openlibrary_search_authors → openlibrary_get_author. openlibrary_get_edition takes a batch of identifiers of one type in a single call. To find a book from a passage rather than its metadata, use openlibrary_search_inside — it searches the scanned text of Internet Archive books and is seconds-slow, so reach for it deliberately. Resolve cover/photo IDs with openlibrary_get_cover_url — it always returns HTTP 200, so a missing image is a 1×1 placeholder GIF, not an error.',
   landing: { requireAuth: false },
   tools: [
     openlibrarySearchBooks,
+    openlibrarySearchInside,
     openlibraryGetWork,
     openlibraryGetEditions,
     openlibraryGetEdition,

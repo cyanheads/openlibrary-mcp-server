@@ -3,11 +3,13 @@
  * @module tests/tools/openlibrary-get-edition-edge.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
-import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import {
+  getOpenLibraryService,
+  initOpenLibraryService,
+} from '@/services/open-library/open-library-service.js';
 
 const FULL_EDITION = {
   edition_id: 'OL7353617M',
@@ -29,168 +31,81 @@ const FULL_EDITION = {
   ebook_url: 'https://archive.org/details/greatgatsby00fitz',
 };
 
+/**
+ * Runs the handler with one identifier and reports which identifiers reached the
+ * service. An empty array means the value was rejected before any upstream call.
+ */
+async function identifiersSentUpstream(identifier: string, idType: string): Promise<string[]> {
+  const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+  const spy = vi
+    .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
+    .mockResolvedValue({ editions: [FULL_EDITION], unresolved: [] });
+  const input = openlibraryGetEdition.input.parse({ identifiers: [identifier], id_type: idType });
+  await openlibraryGetEdition.handler(input, ctx).catch(() => undefined);
+  return (spy.mock.calls[0]?.[0] as string[] | undefined) ?? [];
+}
+
 describe('openlibraryGetEdition — edge cases', () => {
   beforeEach(() => {
     initOpenLibraryService();
+    vi.restoreAllMocks();
   });
 
   // ─── ISBN validation ────────────────────────────────────────────────────────
 
   it('accepts ISBN-10 with hyphens', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({
-      identifier: '0-7432-7356-7',
-      id_type: 'isbn',
-    });
-    await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalled();
+    expect(await identifiersSentUpstream('0-7432-7356-7', 'isbn')).toEqual(['0-7432-7356-7']);
   });
 
   it('accepts ISBN-13 with hyphens', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({
-      identifier: '978-0-7432-7356-5',
-      id_type: 'isbn',
-    });
-    await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalled();
+    expect(await identifiersSentUpstream('978-0-7432-7356-5', 'isbn')).toEqual([
+      '978-0-7432-7356-5',
+    ]);
   });
 
   it('rejects ISBN shorter than 10 digits after stripping hyphens', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: '12345', id_type: 'isbn' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
-    });
+    expect(await identifiersSentUpstream('12345', 'isbn')).toEqual([]);
   });
 
   it('rejects ISBN-11 (non-standard length)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: '12345678901', id_type: 'isbn' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
-    });
+    expect(await identifiersSentUpstream('12345678901', 'isbn')).toEqual([]);
   });
 
   // ─── OLID validation ────────────────────────────────────────────────────────
 
   it('accepts uppercase OLID format', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OL7353617M', id_type: 'olid' });
-    await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalled();
+    expect(await identifiersSentUpstream('OL7353617M', 'olid')).toEqual(['OL7353617M']);
   });
 
   it('accepts lowercase olid pattern (ol1234m)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({ identifier: 'ol7353617m', id_type: 'olid' });
-    await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalled();
+    expect(await identifiersSentUpstream('ol7353617m', 'olid')).toEqual(['ol7353617m']);
   });
 
   it('rejects OLID with wrong suffix (A instead of M)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OL7353617A', id_type: 'olid' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
-    });
+    expect(await identifiersSentUpstream('OL7353617A', 'olid')).toEqual([]);
   });
 
   it('rejects OLID without numeric segment', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OLM', id_type: 'olid' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
-    });
+    expect(await identifiersSentUpstream('OLM', 'olid')).toEqual([]);
   });
 
   // ─── OCLC and LCCN paths ────────────────────────────────────────────────────
 
   it('accepts oclc id_type and passes to service', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({
-      identifier: '36863723',
-      id_type: 'oclc',
-    });
-    const result = await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalledWith('36863723', 'oclc', ctx);
-    expect(result.edition_id).toBe('OL7353617M');
+    expect(await identifiersSentUpstream('36863723', 'oclc')).toEqual(['36863723']);
   });
 
   it('accepts lccn id_type and passes to service', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValueOnce(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({
-      identifier: '00027665',
-      id_type: 'lccn',
-    });
-    await openlibraryGetEdition.handler(input, ctx);
-    expect(spy).toHaveBeenCalledWith('00027665', 'lccn', ctx);
+    expect(await identifiersSentUpstream('00027665', 'lccn')).toEqual(['00027665']);
   });
 
   it('rejects a non-numeric OCLC identifier locally before any upstream call', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    // Mocked so a regression that skips validation cannot reach the live API.
-    const spy = vi.spyOn(svc, 'getEditionByIdentifier').mockResolvedValue(FULL_EDITION);
-
-    const input = openlibraryGetEdition.input.parse({
-      identifier: 'abc-not-oclc',
-      id_type: 'oclc',
-    });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_identifier' },
-    });
-    expect(spy).not.toHaveBeenCalled();
+    expect(await identifiersSentUpstream('abc-not-oclc', 'oclc')).toEqual([]);
   });
 
-  // ─── not_found error from service ──────────────────────────────────────────
-
-  it('propagates not_found for OCLC identifier', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-    const svc = (
-      await import('@/services/open-library/open-library-service.js')
-    ).getOpenLibraryService();
-    vi.spyOn(svc, 'getEditionByIdentifier').mockRejectedValueOnce({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Edition not found for OCLC',
-    });
-
-    const input = openlibraryGetEdition.input.parse({ identifier: '9999999', id_type: 'oclc' });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-    });
+  // LCCN has no fixed upstream format, so nothing is rejected locally for it.
+  it('passes an unusual LCCN through rather than guessing at a format', async () => {
+    expect(await identifiersSentUpstream('agr 62000298', 'lccn')).toEqual(['agr 62000298']);
   });
 
   // ─── Format edge cases ──────────────────────────────────────────────────────
@@ -200,7 +115,9 @@ describe('openlibraryGetEdition — edge cases', () => {
       ...FULL_EDITION,
       authors: [{ name: 'Anonymous Author', source: 'edition' as const }],
     };
-    const text = (openlibraryGetEdition.format!(edition)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+    ).text;
     expect(text).toContain('Anonymous Author');
     // Should not show parenthetical ID
     expect(text).not.toContain('undefined');
@@ -214,7 +131,9 @@ describe('openlibraryGetEdition — edge cases', () => {
         { name: 'Work Credit', author_id: 'OL2A', source: 'work' as const },
       ],
     };
-    const text = (openlibraryGetEdition.format!(edition)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+    ).text;
     expect(text).toContain('**Authors:** Edition Credit (OL1A)');
     expect(text).toContain('from parent work');
     expect(text).toContain('Work Credit (OL2A)');
@@ -223,7 +142,9 @@ describe('openlibraryGetEdition — edge cases', () => {
 
   it('formats edition without ebook url', () => {
     const edition = { ...FULL_EDITION, ebook_url: undefined };
-    const text = (openlibraryGetEdition.format!(edition)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+    ).text;
     expect(text).not.toContain('E-book:');
   });
 
@@ -240,7 +161,9 @@ describe('openlibraryGetEdition — edge cases', () => {
       lc_classifications: [],
       cover_ids: [],
     };
-    const text = (openlibraryGetEdition.format!(sparse)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [] })[0] as { text: string }
+    ).text;
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
   });

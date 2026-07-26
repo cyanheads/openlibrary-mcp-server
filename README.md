@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/openlibrary-mcp-server</h1>
   <p><b>Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.</b>
-  <div>9 Tools • 2 Resources</div>
+  <div>10 Tools • 2 Resources</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.20-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,18 +25,19 @@
 
 ## Tools
 
-9 tools for working with Open Library's catalog of 20M+ books, editions, authors, and subjects:
+10 tools for working with Open Library's catalog of 20M+ books, editions, authors, and subjects:
 
 | Tool | Description |
 |:---|:---|
 | `openlibrary_search_books` | Full-text book search with field filters (title, author, subject, publisher, ISBN, language), sort options, pagination, and optional live reading availability |
 | `openlibrary_get_work` | Fetch a work by Open Library Work ID (OL…W) — title, description, subjects, cover IDs, and author IDs |
 | `openlibrary_get_editions` | List editions of a work — publishers, languages, formats, ISBNs, and print run details |
-| `openlibrary_get_edition` | Fetch a single edition by ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M) |
+| `openlibrary_get_edition` | Resolve up to 50 editions in one call by ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M), reporting per-identifier misses |
 | `openlibrary_search_authors` | Search authors by name — returns Author IDs, birth/death dates, top works, and subject associations |
 | `openlibrary_get_author` | Fetch author detail by Open Library Author ID (OL…A) — bio, dates, photo IDs, and linked identifiers from Wikidata, VIAF, ISNI, Goodreads, and LibraryThing |
 | `openlibrary_get_author_works` | List works by an author — titles, cover IDs, and Work OLIDs for drilling into editions or details |
 | `openlibrary_get_subject` | Browse works by subject tag — returns matching works with edition counts and cover IDs plus the total work count |
+| `openlibrary_search_inside` | Full-text search inside the scanned text of Internet Archive books — returns matching items with snippets |
 | `openlibrary_get_cover_url` | Resolve a cover image URL for a book or author photo in S/M/L size — returns a direct HTTPS URL embeddable in markdown |
 
 ### `openlibrary_search_books`
@@ -74,11 +75,13 @@ List editions of a work — different publishers, languages, formats, and print 
 
 ### `openlibrary_get_edition`
 
-Fetch a single edition by identifier.
+Resolve one or more editions by identifier.
 
 - Accepts ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M)
+- Takes 1–50 identifiers per call, all of the same `id_type`, resolved in a single upstream request — a bibliography or shelf export costs one call rather than one per book
 - Pass `id_type "isbn"` for both ISBN-10 and ISBN-13
 - Returns full edition metadata: authors, publisher, language, all identifier types, and the parent work ID
+- Partial success: identifiers that resolve come back in `editions`, the rest in `unresolved` with a reason (`invalid_identifier` for a value that cannot be the given type, `not_found` for one Open Library holds no record for). The call fails only when nothing resolved
 
 ---
 
@@ -121,13 +124,26 @@ Browse works by subject tag.
 
 ---
 
+### `openlibrary_search_inside`
+
+Full-text search inside books scanned by the Internet Archive.
+
+- Answers "which book contains this passage?" — the one question the metadata tools cannot
+- Quote a phrase for an exact-phrase match; unquoted terms match independently
+- Returns Internet Archive items with the matching passages as snippets and a relevance score
+- Snippets are capped in the text output and complete in `structuredContent`, with the omitted count disclosed
+- Seconds-slow against the live index, an order of magnitude above the metadata endpoints — reach for it deliberately
+- Results key on Internet Archive items, not Open Library works: match the returned `ia_identifier` against the `ia_identifiers` on `openlibrary_search_books` results to reach the catalogue record
+
+---
+
 ### `openlibrary_get_cover_url`
 
 Resolve a cover image URL for a book or author photo.
 
 - Returns a direct HTTPS URL in the requested size (S/M/L)
 - URLs can be embedded in markdown as `![cover](url)`
-- The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404
+- The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404, so the identifier format is validated locally first: `id` must be numeric, `isbn` 10 or 13 digits, `olid` an edition OLID (OL…M) for target `book` and an author OLID (OL…A) for target `author`
 
 ## Resources
 
@@ -149,7 +165,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 
 Open Library-specific:
 
-- Complete Open Library REST API integration — Search API, Books API, Authors API, Subjects API, Covers API
+- Complete Open Library REST API integration — Search API, Search Inside (full-text) API, Books API, Authors API, Subjects API, Covers API
 - Configurable `User-Agent` header for well-behaved bot identification per community convention
 - Work → editions → edition drill-down pattern with explicit linking between OLIDs across tools
 - Internet Archive availability lookup (opt-in) for borrow/read status on search results
@@ -290,7 +306,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Nine tools across Search, Books, Authors, Subjects, and Covers. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Ten tools across Search, Books, Authors, Subjects, and Covers. |
 | `src/mcp-server/resources` | Resource definitions. Work and Author resources. |
 | `src/services/open-library` | Open Library service layer — API client and domain types. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |

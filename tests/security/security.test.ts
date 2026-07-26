@@ -66,9 +66,9 @@ describe('security — no env secrets appear in tool output or errors', () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getEditionByIdentifier').mockRejectedValueOnce(new Error('Not found'));
+    vi.spyOn(svc, 'getEditionsByIdentifiers').mockRejectedValueOnce(new Error('Not found'));
 
-    const input = openlibraryGetEdition.input.parse({ identifier: 'OL1M', id_type: 'olid' });
+    const input = openlibraryGetEdition.input.parse({ identifiers: ['OL1M'], id_type: 'olid' });
     try {
       await openlibraryGetEdition.handler(input, ctx);
     } catch (err) {

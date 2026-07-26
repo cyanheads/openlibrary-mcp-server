@@ -5,7 +5,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { normalizeLanguageCode } from './language-codes.js';
@@ -17,6 +17,7 @@ import type {
   EditionDetail,
   EditionIdType,
   EditionSummary,
+  InsideMatch,
   SearchWork,
   SubjectWork,
   WorkAvailability,
@@ -26,6 +27,89 @@ import type {
 const BASE_URL = 'https://openlibrary.org';
 const COVERS_URL = 'https://covers.openlibrary.org';
 const TIMEOUT_MS = 15_000;
+
+/** Bibkey prefix `/api/books` expects for each identifier type. */
+const BIBKEY_PREFIX: Record<EditionIdType, string> = {
+  isbn: 'ISBN',
+  oclc: 'OCLC',
+  lccn: 'LCCN',
+  olid: 'OLID',
+};
+
+/**
+ * How many enrichment requests one identifier batch may have in flight against
+ * openlibrary.org at once. `/api/books` resolves the whole batch in a single
+ * request, but an edition carrying no inline authors still costs a work lookup
+ * plus one lookup per author credit — at the 50-identifier cap that is well over
+ * a hundred requests, and ungated they would all open at once. Open Library is
+ * volunteer-run infrastructure, so the batch trickles them through instead.
+ *
+ * Six balances the two costs: it holds the sustained rate of a worst-case batch
+ * near ten requests a second rather than dumping the whole fan-out in one tick,
+ * while still finishing a large batch in a fraction of the serial time.
+ */
+export const EDITION_ENRICHMENT_CONCURRENCY = 6;
+
+/**
+ * Caps how many tasks run at once. Callers keep their existing `Promise.all`
+ * shape — and therefore their result order — while the gate decides when each
+ * task actually starts.
+ *
+ * Scope one gate per batch, not per service: the service is a singleton, so a
+ * shared gate would queue unrelated concurrent tool calls behind each other.
+ */
+class ConcurrencyGate {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    // Re-check after waking: a slot freed for this waiter can be taken by a
+    // caller that entered between the release and this continuation.
+    while (this.active >= this.limit) {
+      await new Promise<void>((resolve) => {
+        this.waiting.push(resolve);
+      });
+    }
+    this.active++;
+    try {
+      return await task();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+/** The `details` payload `/api/books?jscmd=details` returns per resolved bibkey. */
+type RawEditionDetails = {
+  key?: string;
+  title?: string;
+  authors?: Array<{ key: string; name?: string }>;
+  publish_date?: string;
+  publishers?: string[];
+  languages?: Array<{ key: string }>;
+  isbn_10?: string[];
+  isbn_13?: string[];
+  oclc_numbers?: string[];
+  lccn?: string[];
+  lc_classifications?: string[];
+  number_of_pages?: number;
+  description?: unknown;
+  covers?: number[];
+  works?: Array<{ key: string }>;
+  ocaid?: string;
+};
+
+/**
+ * Strips the `{{{…}}}` markers the full-text index wraps around matched terms.
+ * They are an upstream highlight convention rather than book content, so a model
+ * reading the snippet should see the sentence as it appears on the page.
+ */
+function normalizeHighlight(snippet: string): string {
+  return snippet.replaceAll('{{{', '').replaceAll('}}}', '');
+}
 
 /** Every `ebook_access` tier Open Library publishes, in ascending order of access. */
 const EBOOK_ACCESS_TIERS: ReadonlySet<string> = new Set<SearchWork['ebook_access']>([
@@ -100,6 +184,42 @@ export function isUnsafeCoverIdentifier(identifier: string): boolean {
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;
+}
+
+/**
+ * Describes the identifier shape the Covers API expects for one
+ * `id_type` × `target` pair, or `undefined` when the supplied identifier already
+ * matches it. The Covers API answers every request with HTTP 200 — a malformed
+ * identifier yields the same 1×1 placeholder GIF a genuinely coverless book
+ * does — so a typo is only ever caught here.
+ *
+ * Exported so the tool handler and {@link OpenLibraryService.getCoverUrl}'s
+ * enforcement seam check one rule rather than two copies of it.
+ */
+export function coverIdentifierExpectation(
+  identifier: string,
+  idType: 'id' | 'isbn' | 'olid',
+  target: 'book' | 'author',
+): string | undefined {
+  if (idType === 'id') {
+    return /^\d+$/.test(identifier) ? undefined : 'a numeric cover or photo ID (e.g., 9255566)';
+  }
+  if (idType === 'isbn') {
+    const digits = identifier.replace(/-/g, '');
+    return /^\d{10}$/.test(digits) || /^\d{13}$/.test(digits)
+      ? undefined
+      : 'an ISBN of 10 or 13 digits, hyphens optional (e.g., 9780743273565)';
+  }
+  // An edition OLID passed with target "author" resolves to a plausible author
+  // photo URL that can only ever serve the placeholder, so the suffix is checked
+  // against the target rather than accepted as any OLID.
+  return target === 'author'
+    ? /^OL\d+A$/i.test(identifier)
+      ? undefined
+      : 'an author OLID ending in A (e.g., OL24638A)'
+    : /^OL\d+M$/i.test(identifier)
+      ? undefined
+      : 'an edition OLID ending in M (e.g., OL7353617M)';
 }
 
 export class OpenLibraryService {
@@ -341,22 +461,23 @@ export class OpenLibraryService {
   // ─── Edition by identifier ────────────────────────────────────────────────────
 
   /**
-   * Resolves `/authors/{id}` display names in parallel, tagging each entry with
-   * the provenance of the attribution. An author whose lookup fails degrades to
-   * its own ID as the name rather than dropping the credit entirely.
+   * Resolves `/authors/{id}` display names in parallel — up to whatever `gate`
+   * allows in flight — tagging each entry with the provenance of the
+   * attribution. An author whose lookup fails degrades to its own ID as the name
+   * rather than dropping the credit entirely.
    */
   private resolveAuthors(
     authorKeys: string[],
     source: EditionAuthor['source'],
     ctx: Context,
+    gate: ConcurrencyGate,
   ): Promise<EditionAuthor[]> {
     return Promise.all(
       authorKeys.map(async (key) => {
         const authorId = stripPrefix(key, '/authors/');
         try {
-          const authorRaw = await this.fetch<{ name?: string }>(
-            `${BASE_URL}/authors/${authorId}.json`,
-            ctx,
+          const authorRaw = await gate.run(() =>
+            this.fetch<{ name?: string }>(`${BASE_URL}/authors/${authorId}.json`, ctx),
           );
           return { name: authorRaw.name ?? authorId, author_id: authorId, source };
         } catch {
@@ -372,129 +493,34 @@ export class OpenLibraryService {
    * `authors` of its own is usually attributed here rather than genuinely
    * anonymous.
    */
-  private async workAuthorKeys(workKey: string | undefined, ctx: Context): Promise<string[]> {
+  private async workAuthorKeys(
+    workKey: string | undefined,
+    ctx: Context,
+    gate: ConcurrencyGate,
+  ): Promise<string[]> {
     if (!workKey) return [];
     const workId = stripPrefix(workKey, '/works/');
-    const raw = await this.fetchOrNull<{ authors?: Array<{ author?: { key?: string } }> }>(
-      `${BASE_URL}/works/${workId}.json`,
-      ctx,
+    const raw = await gate.run(() =>
+      this.fetchOrNull<{ authors?: Array<{ author?: { key?: string } }> }>(
+        `${BASE_URL}/works/${workId}.json`,
+        ctx,
+      ),
     );
     return (raw?.authors ?? [])
       .map((entry) => entry.author?.key)
       .filter((key): key is string => typeof key === 'string');
   }
 
-  async getEditionByIdentifier(
-    identifier: string,
-    idType: EditionIdType,
+  /**
+   * Maps one `/api/books` `details` payload onto the domain edition shape. The
+   * secondary lookups the work-level fallback needs run through `gate`, which is
+   * shared across the whole batch.
+   */
+  private async toEditionDetail(
+    d: RawEditionDetails,
     ctx: Context,
+    gate: ConcurrencyGate,
   ): Promise<EditionDetail> {
-    ctx.log.debug('Fetching edition', { identifier, idType });
-
-    if (idType === 'isbn' || idType === 'olid') {
-      const path =
-        idType === 'isbn' ? `isbn/${identifier.replace(/-/g, '')}` : `books/${identifier}`;
-      const url = `${BASE_URL}/${path}.json`;
-      const raw = await this.fetchOrNull<{
-        key?: string;
-        title?: string;
-        authors?: Array<{ key: string }>;
-        publish_date?: string;
-        publishers?: string[];
-        languages?: Array<{ key: string }>;
-        isbn_10?: string[];
-        isbn_13?: string[];
-        oclc_numbers?: string[];
-        lccn?: string[];
-        lc_classifications?: string[];
-        number_of_pages?: number;
-        description?: unknown;
-        covers?: number[];
-        works?: Array<{ key: string }>;
-        ocaid?: string;
-        error?: string;
-      }>(url, ctx);
-
-      if (!raw || raw.error === 'notfound' || !raw.key) {
-        throw notFound(
-          `Edition not found for ${idType.toUpperCase()} "${identifier}". Verify the identifier or try searching by title/author.`,
-          { reason: 'not_found', ...ctx.recoveryFor('not_found') },
-        );
-      }
-
-      // Resolve author names via parallel secondary lookups, falling back to the
-      // parent work when the edition itself records no authors.
-      let authors = await this.resolveAuthors(
-        (raw.authors ?? []).map((authorRef) => authorRef.key),
-        'edition',
-        ctx,
-      );
-      if (authors.length === 0) {
-        const workKeys = await this.workAuthorKeys(raw.works?.[0]?.key, ctx);
-        authors = await this.resolveAuthors(workKeys, 'work', ctx);
-      }
-
-      const editionId = stripPrefix(raw.key, '/books/');
-      const edDesc = extractDescription(raw.description);
-      return {
-        edition_id: editionId,
-        title: raw.title ?? '',
-        authors,
-        ...(raw.publish_date ? { publish_date: raw.publish_date } : {}),
-        publishers: raw.publishers ?? [],
-        ...(raw.languages?.[0] ? { language: extractLanguageCode(raw.languages[0].key) } : {}),
-        isbn_10: raw.isbn_10 ?? [],
-        isbn_13: raw.isbn_13 ?? [],
-        oclc: raw.oclc_numbers ?? [],
-        lccn: raw.lccn ?? [],
-        lc_classifications: raw.lc_classifications ?? [],
-        ...(typeof raw.number_of_pages === 'number' && { page_count: raw.number_of_pages }),
-        ...(edDesc !== undefined ? { description: edDesc } : {}),
-        cover_ids: raw.covers ?? [],
-        ...(raw.works?.[0]?.key ? { work_id: stripPrefix(raw.works[0].key, '/works/') } : {}),
-        ...(raw.ocaid ? { ebook_url: `https://archive.org/details/${raw.ocaid}` } : {}),
-      };
-    }
-
-    // OCLC / LCCN route — use /api/books with jscmd=details
-    const prefix = idType === 'oclc' ? 'OCLC' : 'LCCN';
-    const bibkey = `${prefix}:${identifier}`;
-    const url = `${BASE_URL}/api/books?bibkeys=${encodeURIComponent(bibkey)}&format=json&jscmd=details`;
-    const rawMap = await this.fetch<
-      Record<
-        string,
-        {
-          details?: {
-            key?: string;
-            title?: string;
-            authors?: Array<{ key: string; name?: string }>;
-            publish_date?: string;
-            publishers?: string[];
-            languages?: Array<{ key: string }>;
-            isbn_10?: string[];
-            isbn_13?: string[];
-            oclc_numbers?: string[];
-            lccn?: string[];
-            lc_classifications?: string[];
-            number_of_pages?: number;
-            description?: unknown;
-            covers?: number[];
-            works?: Array<{ key: string }>;
-            ocaid?: string;
-          };
-        }
-      >
-    >(url, ctx);
-
-    const entry = rawMap[bibkey];
-    if (!entry?.details?.key) {
-      throw notFound(
-        `Edition not found for ${prefix} "${identifier}". Verify the identifier or try searching by title/author.`,
-        { reason: 'not_found', ...ctx.recoveryFor('not_found') },
-      );
-    }
-
-    const d = entry.details;
     // This route embeds author names inline; only the work-level fallback needs
     // secondary lookups.
     let authors: EditionAuthor[] = (d.authors ?? []).map((a) => ({
@@ -503,11 +529,11 @@ export class OpenLibraryService {
       source: 'edition',
     }));
     if (authors.length === 0) {
-      const workKeys = await this.workAuthorKeys(d.works?.[0]?.key, ctx);
-      authors = await this.resolveAuthors(workKeys, 'work', ctx);
+      const workKeys = await this.workAuthorKeys(d.works?.[0]?.key, ctx, gate);
+      authors = await this.resolveAuthors(workKeys, 'work', ctx, gate);
     }
 
-    const oclcDesc = extractDescription(d.description);
+    const description = extractDescription(d.description);
     return {
       edition_id: stripPrefix(d.key ?? '', '/books/'),
       title: d.title ?? '',
@@ -521,11 +547,122 @@ export class OpenLibraryService {
       lccn: d.lccn ?? [],
       lc_classifications: d.lc_classifications ?? [],
       ...(typeof d.number_of_pages === 'number' && { page_count: d.number_of_pages }),
-      ...(oclcDesc !== undefined ? { description: oclcDesc } : {}),
+      ...(description !== undefined ? { description } : {}),
       cover_ids: d.covers ?? [],
       ...(d.works?.[0]?.key ? { work_id: stripPrefix(d.works[0].key, '/works/') } : {}),
       ...(d.ocaid ? { ebook_url: `https://archive.org/details/${d.ocaid}` } : {}),
     };
+  }
+
+  /**
+   * Resolves a batch of identifiers of one type in a single `/api/books` request.
+   * All four bibkey prefixes go through this one route: it accepts many keys per
+   * call and embeds author names inline, so a list of N identifiers costs one
+   * request instead of N lookups plus a secondary lookup per author.
+   *
+   * Open Library omits an unresolvable bibkey from the response map entirely —
+   * no null, no error entry — so a requested key missing from the map is the
+   * not-found signal. Those identifiers come back in `unresolved` rather than
+   * failing the whole batch; the caller decides whether an empty `editions` is
+   * an error.
+   *
+   * Editions whose authors are only recorded on the parent work still need
+   * per-edition lookups. Those share one {@link ConcurrencyGate} across the
+   * batch, so a 50-identifier request tapers its follow-up traffic instead of
+   * opening a socket per edition and per author credit at once.
+   */
+  async getEditionsByIdentifiers(
+    identifiers: string[],
+    idType: EditionIdType,
+    ctx: Context,
+  ): Promise<{ editions: EditionDetail[]; unresolved: string[] }> {
+    // Keep the caller's identifier alongside the key sent upstream: the response
+    // is keyed by the bibkey, which differs from the input for a hyphenated ISBN.
+    const requested = identifiers.map((identifier) => ({
+      identifier,
+      bibkey: `${BIBKEY_PREFIX[idType]}:${idType === 'isbn' ? identifier.replace(/-/g, '') : identifier}`,
+    }));
+    ctx.log.debug('Fetching editions', { idType, count: requested.length });
+
+    const bibkeys = requested.map((r) => r.bibkey).join(',');
+    const url = `${BASE_URL}/api/books?bibkeys=${encodeURIComponent(bibkeys)}&format=json&jscmd=details`;
+    const rawMap = await this.fetch<Record<string, { details?: RawEditionDetails }>>(url, ctx);
+
+    const gate = new ConcurrencyGate(EDITION_ENRICHMENT_CONCURRENCY);
+    const resolved = await Promise.all(
+      requested.map(async ({ identifier, bibkey }) => {
+        const details = rawMap[bibkey]?.details;
+        if (!details?.key) return { identifier, edition: undefined };
+        return { identifier, edition: await this.toEditionDetail(details, ctx, gate) };
+      }),
+    );
+
+    const editions: EditionDetail[] = [];
+    const unresolved: string[] = [];
+    for (const { identifier, edition } of resolved) {
+      if (edition) editions.push(edition);
+      else unresolved.push(identifier);
+    }
+    return { editions, unresolved };
+  }
+
+  // ─── Full-text search inside scanned books ────────────────────────────────────
+
+  /**
+   * Searches the full text of scanned Internet Archive books. The endpoint is an
+   * Elasticsearch passthrough: the item and metadata `fields` arrive as arrays
+   * (take `[0]`) while the per-file bookkeeping ones are bare strings, the
+   * metadata keys are `meta_`-prefixed, and `_id` is a composite
+   * `identifier|sha1` rather than a bare IA identifier. A zero-match query is an
+   * HTTP 200 with `hits.total: 0`, not an error.
+   */
+  async searchInside(
+    query: string,
+    limit: number,
+    offset: number,
+    ctx: Context,
+  ): Promise<{ total: number; offset: number; matches: InsideMatch[] }> {
+    const qs = new URLSearchParams({
+      q: query,
+      limit: String(limit),
+      offset: String(offset),
+    });
+    const url = `${BASE_URL}/search/inside.json?${qs.toString()}`;
+    ctx.log.debug('Searching inside books', { query, limit, offset });
+
+    const raw = await this.fetch<{
+      hits?: {
+        total?: number;
+        hits?: Array<{
+          _score?: number;
+          fields?: {
+            identifier?: string[];
+            meta_title?: string[];
+            meta_creator?: string[];
+          };
+          highlight?: { text?: string[] };
+        }>;
+      };
+    }>(url, ctx);
+
+    const matches: InsideMatch[] = [];
+    for (const hit of raw.hits?.hits ?? []) {
+      // These `fields` values arrive as arrays; the IA identifier is the only
+      // join back to the catalogue, so a hit without one is unusable.
+      const iaIdentifier = hit.fields?.identifier?.[0];
+      if (!iaIdentifier) continue;
+      const title = hit.fields?.meta_title?.[0];
+      const creator = hit.fields?.meta_creator?.[0];
+      matches.push({
+        ia_identifier: iaIdentifier,
+        ...(title ? { title } : {}),
+        ...(creator ? { creator } : {}),
+        snippets: (hit.highlight?.text ?? []).map(normalizeHighlight),
+        score: hit._score ?? 0,
+      });
+    }
+
+    return { total: raw.hits?.total ?? 0, offset, matches };
   }
 
   // ─── Authors ──────────────────────────────────────────────────────────────────
@@ -725,6 +862,12 @@ export class OpenLibraryService {
     if (target === 'author' && idType === 'isbn') {
       throw validationError('Author photos cannot be looked up by ISBN.', {
         reason: 'invalid_target',
+      });
+    }
+    const expected = coverIdentifierExpectation(identifier, idType, target);
+    if (expected) {
+      throw validationError(`Cover identifier "${identifier}" is not ${expected}.`, {
+        reason: 'invalid_identifier',
       });
     }
     const prefix = target === 'author' ? 'a' : 'b';

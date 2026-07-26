@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 09:48:05
+Generated on: 2026-07-26 11:15:05
 
 ```text
 openlibrary-mcp-server/
@@ -21,6 +21,7 @@ openlibrary-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -147,7 +148,8 @@ openlibrary-mcp-server/
 │   │       │   ├── openlibrary-get-subject.tool.ts
 │   │       │   ├── openlibrary-get-work.tool.ts
 │   │       │   ├── openlibrary-search-authors.tool.ts
-│   │       │   └── openlibrary-search-books.tool.ts
+│   │       │   ├── openlibrary-search-books.tool.ts
+│   │       │   └── openlibrary-search-inside.tool.ts
 │   │       └── capped-list-notice.ts
 │   ├── services/
 │   │   └── open-library/
@@ -183,7 +185,8 @@ openlibrary-mcp-server/
 │       ├── openlibrary-search-authors-edge.tool.test.ts
 │       ├── openlibrary-search-authors.tool.test.ts
 │       ├── openlibrary-search-books-edge.tool.test.ts
-│       └── openlibrary-search-books.tool.test.ts
+│       ├── openlibrary-search-books.tool.test.ts
+│       └── openlibrary-search-inside.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-26
+
+Adopt mcp-ts-core ^0.11.0: MCPB bundles strip platform-specific native bindings (not just agent docs), check-dependency-specifiers now covers the overrides section, and field-test/canvas skills re-synced.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-26 · ⚠️ Breaking
 
 get_edition resolves up to 50 identifiers in one call with partial-success reporting (breaking input/output change); a new search_inside tool finds books by scanned-text passage; get_cover_url validates identifier format before building a URL instead of a confident link to a placeholder image.

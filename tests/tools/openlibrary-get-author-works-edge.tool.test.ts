@@ -58,7 +58,13 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
     const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryGetAuthorWorks.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
+      data: {
+        reason: 'not_found',
+        // The declared hint must reach the wire, not just live in errors[].
+        recovery: {
+          hint: openlibraryGetAuthorWorks.errors!.find((e) => e.reason === 'not_found')!.recovery,
+        },
+      },
     });
   });
 

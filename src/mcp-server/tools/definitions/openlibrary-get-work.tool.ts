@@ -76,7 +76,13 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     ctx.log.info('Fetching work', { work_id: input.work_id });
     const svc = getOpenLibraryService();
     const result = await svc.getWork(input.work_id, ctx);
-    if (!result) throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
+    if (!result) {
+      throw ctx.fail(
+        'not_found',
+        `Work ${input.work_id} not found on Open Library.`,
+        ctx.recoveryFor('not_found'),
+      );
+    }
 
     // Disclose the subjects that format() caps out of the text; structuredContent keeps all.
     if (result.subjects.length > SUBJECTS_TEXT_CAP) {

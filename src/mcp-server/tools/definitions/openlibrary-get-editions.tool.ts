@@ -86,7 +86,13 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     });
     const svc = getOpenLibraryService();
     const result = await svc.getEditions(input.work_id, input.limit, input.offset, ctx);
-    if (!result) throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
+    if (!result) {
+      throw ctx.fail(
+        'not_found',
+        `Work ${input.work_id} not found on Open Library.`,
+        ctx.recoveryFor('not_found'),
+      );
+    }
     ctx.enrich.total(result.total);
     return result;
   },

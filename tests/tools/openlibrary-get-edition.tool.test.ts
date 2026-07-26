@@ -52,6 +52,28 @@ describe('openlibraryGetEdition', () => {
     });
   });
 
+  // Each id_type validates in its own branch, so the declared hint has to be
+  // attached at all three throw sites — not just whichever one a test happens
+  // to exercise.
+  it.each([
+    ['isbn' as const, 'notanisbn'],
+    ['olid' as const, 'OL1234'],
+    ['oclc' as const, 'abc-not-oclc'],
+  ])('delivers the declared invalid_identifier recovery on the %s branch', async (idType, id) => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const input = openlibraryGetEdition.input.parse({ identifier: id, id_type: idType });
+
+    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_identifier',
+        recovery: {
+          hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'invalid_identifier')!
+            .recovery,
+        },
+      },
+    });
+  });
+
   it('returns edition detail for valid ISBN', async () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
     const svc = (

@@ -63,8 +63,13 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     ctx.log.info('Fetching author works', { author_id: input.author_id, limit: input.limit });
     const svc = getOpenLibraryService();
     const result = await svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
-    if (!result)
-      throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
+    if (!result) {
+      throw ctx.fail(
+        'not_found',
+        `Author ${input.author_id} not found on Open Library.`,
+        ctx.recoveryFor('not_found'),
+      );
+    }
     ctx.enrich.total(result.total);
     return result;
   },

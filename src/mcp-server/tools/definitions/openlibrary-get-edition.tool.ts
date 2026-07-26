@@ -111,6 +111,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           ctx.fail(
             'invalid_identifier',
             `"${input.identifier}" is not a valid ISBN (must be 10 or 13 digits).`,
+            ctx.recoveryFor('invalid_identifier'),
           ),
         );
       }
@@ -120,6 +121,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           ctx.fail(
             'invalid_identifier',
             `"${input.identifier}" is not a valid Open Library Edition ID. Expected format: OL…M (e.g., OL7353617M).`,
+            ctx.recoveryFor('invalid_identifier'),
           ),
         );
       }
@@ -129,6 +131,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           ctx.fail(
             'invalid_identifier',
             `"${input.identifier}" is not a valid OCLC number (must be numeric).`,
+            ctx.recoveryFor('invalid_identifier'),
           ),
         );
       }

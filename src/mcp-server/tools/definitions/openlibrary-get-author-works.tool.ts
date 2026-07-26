@@ -5,7 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import {
+  getOpenLibraryService,
+  normalizeAuthorId,
+} from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   title: 'Get Author Works',
@@ -48,6 +51,10 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   }),
   enrichment: {
     totalCount: z.number().optional().describe('Total works by this author across all pages.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Set when the requested author ID was merged into a different canonical ID.'),
   },
   errors: [
     {
@@ -71,6 +78,17 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
       );
     }
     ctx.enrich.total(result.total);
+    // Open Library keeps a merged author reachable under its old ID, so the works
+    // can come back under a different one than was asked for. `format()` is handed
+    // only the result and never sees the request, so the substitution is disclosed
+    // here or not at all — and only when the IDs actually differ, since an
+    // unconditional call would render an empty notice on every ordinary lookup.
+    const requested = normalizeAuthorId(input.author_id);
+    if (result.author_id !== requested) {
+      ctx.enrich.notice(
+        `${requested} is a merged record; these are the works of ${result.author_id}. Use ${result.author_id} for further lookups.`,
+      );
+    }
     return result;
   },
 

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetAuthor } from '@/mcp-server/tools/definitions/openlibrary-get-author.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -65,6 +65,56 @@ describe('openlibraryGetAuthor', () => {
         },
       },
     });
+  });
+
+  // `format()` receives only the domain payload, never the input, so it cannot
+  // see that the returned author differs from the requested one. The handler's
+  // enrichment notice is the only place the substitution can be disclosed.
+  it('discloses a merged-ID substitution through the enrichment notice', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce({
+      ...FULL_AUTHOR,
+      author_id: 'OL19981A',
+      name: 'Stephen King',
+    });
+
+    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL2162284A' });
+    await openlibraryGetAuthor.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('OL2162284A');
+    expect(notice).toContain('OL19981A');
+  });
+
+  it('adds no notice when the returned author is the one requested', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(FULL_AUTHOR);
+
+    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL24638A' });
+    await openlibraryGetAuthor.handler(input, ctx);
+
+    // An unguarded enrich call would key `notice` to undefined and render a
+    // literal "undefined" line on every ordinary lookup.
+    expect(getEnrichment(ctx)).not.toHaveProperty('notice');
+  });
+
+  it('compares against the requested ID with its /authors/ prefix stripped', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(FULL_AUTHOR);
+
+    const input = openlibraryGetAuthor.input.parse({ author_id: '/authors/OL24638A' });
+    await openlibraryGetAuthor.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).not.toHaveProperty('notice');
   });
 
   it('formats author with all fields', () => {

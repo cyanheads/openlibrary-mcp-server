@@ -5,7 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import {
+  getOpenLibraryService,
+  normalizeAuthorId,
+} from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetAuthor = tool('openlibrary_get_author', {
   title: 'Get Author',
@@ -48,6 +51,12 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
       })
       .describe('Remote identifiers for cross-referencing with other databases.'),
   }),
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Set when the requested author ID was merged into a different canonical ID.'),
+  },
   errors: [
     {
       reason: 'not_found',
@@ -67,6 +76,16 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
         'not_found',
         `Author ${input.author_id} not found on Open Library.`,
         ctx.recoveryFor('not_found'),
+      );
+    }
+    // A merged author stays reachable under its old ID, so the record returned can
+    // be a different author's than was asked for. `format()` never sees the input,
+    // so the substitution is disclosed here — and only on an actual difference, or
+    // every ordinary lookup would carry an empty notice.
+    const requested = normalizeAuthorId(input.author_id);
+    if (result.author_id !== requested) {
+      ctx.enrich.notice(
+        `${requested} is a merged record; this is the canonical author ${result.author_id}. Use ${result.author_id} for further lookups.`,
       );
     }
     return result;

@@ -125,6 +125,32 @@ function stripPrefix(id: string, prefix: string): string {
   return id.startsWith(prefix) ? id.slice(prefix.length) : id;
 }
 
+/** Normalizes an author identifier to its bare OLID form ("/authors/OL24638A" → "OL24638A"). */
+export function normalizeAuthorId(authorId: string): string {
+  return stripPrefix(authorId, '/authors/');
+}
+
+/**
+ * Keeps only entries usable as Covers API identifiers from an upstream `covers`
+ * or `photos` array.
+ *
+ * Open Library writes `-1` into these arrays as its own "no image in this slot"
+ * sentinel rather than omitting the slot, and the same convention makes any
+ * non-positive entry an empty slot — so the filter is `> 0`, not `!== -1`. A
+ * sentinel that reached `cover_ids` would read as a real ID, and the only thing
+ * a client can do with it is spend an `openlibrary_get_cover_url` call to be
+ * told it is invalid.
+ *
+ * The upstream field is *declared* `number[]`, but that is an assertion about
+ * untrusted JSON rather than a guarantee — Open Library nulls values it has no
+ * data for elsewhere in the same payloads (see {@link toEbookAccess}) — so
+ * entries are checked for numeric integrality instead of assumed.
+ */
+function sanitizeImageIds(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id): id is number => Number.isInteger(id) && id > 0);
+}
+
 /** Extracts the 3-letter language code from a raw language key path ("/languages/eng" → "eng"). */
 function extractLanguageCode(key: string): string {
   const parts = key.split('/');
@@ -154,6 +180,65 @@ function extractDescription(raw: unknown): string | undefined {
     return raw.value || undefined;
   }
   return;
+}
+
+/**
+ * How many `/type/redirect` hops an author lookup will follow before giving up.
+ *
+ * Open Library keeps a merged author as a redirect stub pointing at the record
+ * that absorbed it, and an already-merged author can be merged again — so the
+ * stub's target is itself sometimes a stub. Following the chain is therefore
+ * unavoidable, but it is upstream-controlled data: without a cap, a chain that
+ * is circular or pathologically long would hold the request open indefinitely.
+ * Four covers the observed depth with room to spare; past it the lookup fails
+ * closed to the caller's `not_found` rather than looping.
+ */
+export const MAX_AUTHOR_REDIRECT_HOPS = 4;
+
+/** The `/type/*` key Open Library stamps on a merged-away author's stub record. */
+const REDIRECT_TYPE_KEY = '/type/redirect';
+
+/**
+ * The author record as Open Library returns it, including the two fields that
+ * only a merge stub populates meaningfully.
+ *
+ * `location` is present on *every* author record — a live author carries
+ * `"location": null` — so it says nothing on its own about whether the record is
+ * a redirect. `type.key` is the only honest discriminator, and the one
+ * {@link OpenLibraryService.fetchAuthorRecord} branches on.
+ */
+type RawAuthorRecord = {
+  key?: string;
+  name?: string;
+  personal_name?: string;
+  fuller_name?: string;
+  bio?: unknown;
+  birth_date?: string;
+  death_date?: string;
+  photos?: number[];
+  remote_ids?: {
+    wikidata?: string;
+    viaf?: string;
+    isni?: string;
+    goodreads?: string;
+    librarything?: string;
+  };
+  type?: { key?: string };
+  location?: string | null;
+  error?: string;
+};
+
+/**
+ * The canonical author ID a redirect stub points at, or `undefined` when the
+ * stub names no usable target. A stub whose `location` is absent, null, or not
+ * an author OLID is malformed: resolution stops there and the caller reports the
+ * author as absent rather than guessing at a target or fetching a path that
+ * cannot be an author.
+ */
+function redirectTarget(raw: RawAuthorRecord): string | undefined {
+  if (typeof raw.location !== 'string') return;
+  const target = normalizeAuthorId(raw.location.trim());
+  return /^OL\d+A$/i.test(target) ? target : undefined;
 }
 
 /**
@@ -405,7 +490,7 @@ export class OpenLibraryService {
       subject_places: raw.subject_places ?? [],
       subject_times: raw.subject_times ?? [],
       subject_people: raw.subject_people ?? [],
-      cover_ids: raw.covers ?? [],
+      cover_ids: sanitizeImageIds(raw.covers),
       author_ids: (raw.authors ?? []).map((a) => stripPrefix(a.author.key, '/authors/')),
       ...(raw.created?.value !== undefined ? { created: raw.created.value } : {}),
       ...(raw.last_modified?.value !== undefined ? { last_modified: raw.last_modified.value } : {}),
@@ -451,7 +536,7 @@ export class OpenLibraryService {
       isbn_10: e.isbn_10 ?? [],
       isbn_13: e.isbn_13 ?? [],
       ...(typeof e.number_of_pages === 'number' && { page_count: e.number_of_pages }),
-      cover_ids: e.covers ?? [],
+      cover_ids: sanitizeImageIds(e.covers),
       ...(e.works?.[0]?.key ? { work_id: stripPrefix(e.works[0].key, '/works/') } : {}),
     }));
 
@@ -548,7 +633,7 @@ export class OpenLibraryService {
       lc_classifications: d.lc_classifications ?? [],
       ...(typeof d.number_of_pages === 'number' && { page_count: d.number_of_pages }),
       ...(description !== undefined ? { description } : {}),
-      cover_ids: d.covers ?? [],
+      cover_ids: sanitizeImageIds(d.covers),
       ...(d.works?.[0]?.key ? { work_id: stripPrefix(d.works[0].key, '/works/') } : {}),
       ...(d.ocaid ? { ebook_url: `https://archive.org/details/${d.ocaid}` } : {}),
     };
@@ -707,42 +792,78 @@ export class OpenLibraryService {
     };
   }
 
+  /**
+   * Fetches an author record, following Open Library's merge stubs to the record
+   * that actually holds the data.
+   *
+   * A merged author is not deleted: `/authors/{id}.json` answers 200 with a
+   * `/type/redirect` stub naming its successor. The stub carries its own `key`
+   * and no `name`, so a caller that only guards on `key` builds a nameless
+   * author out of it — which is why this resolution belongs here, below every
+   * author-shaped entry point, rather than at each of them.
+   *
+   * Returns the record together with the ID it was finally found under, which is
+   * the canonical one the caller should report back. `null` covers all three
+   * dead ends — absent record, malformed stub, chain past
+   * {@link MAX_AUTHOR_REDIRECT_HOPS} — so callers keep their single `not_found`
+   * path.
+   */
+  private async fetchAuthorRecord(
+    authorId: string,
+    ctx: Context,
+  ): Promise<{ raw: RawAuthorRecord; canonicalId: string } | null> {
+    let id = normalizeAuthorId(authorId);
+    // A re-merge can point back at an ID already visited; stopping on a repeat
+    // fails a cycle closed immediately instead of burning the whole hop budget.
+    const visited = new Set<string>([id]);
+
+    for (let hop = 0; hop <= MAX_AUTHOR_REDIRECT_HOPS; hop++) {
+      ctx.log.debug('Fetching author', { authorId: id, hop });
+      const raw = await this.fetchOrNull<RawAuthorRecord>(`${BASE_URL}/authors/${id}.json`, ctx);
+
+      if (!raw || raw.error === 'notfound' || !raw.key) return null;
+      if (raw.type?.key !== REDIRECT_TYPE_KEY) {
+        return { raw, canonicalId: normalizeAuthorId(raw.key) };
+      }
+
+      const target = redirectTarget(raw);
+      if (!target) {
+        ctx.log.warning('Author redirect names no usable target', {
+          authorId: id,
+          location: raw.location,
+        });
+        return null;
+      }
+      if (visited.has(target)) {
+        ctx.log.warning('Author redirect chain is circular', { authorId: id, target });
+        return null;
+      }
+      visited.add(target);
+      id = target;
+    }
+
+    ctx.log.warning('Author redirect chain exceeded the hop cap', {
+      authorId: normalizeAuthorId(authorId),
+      maxHops: MAX_AUTHOR_REDIRECT_HOPS,
+    });
+    return null;
+  }
+
   async getAuthor(authorId: string, ctx: Context): Promise<AuthorDetail | null> {
-    const id = stripPrefix(authorId, '/authors/');
-    const url = `${BASE_URL}/authors/${id}.json`;
-    ctx.log.debug('Fetching author', { authorId: id });
-
-    const raw = await this.fetchOrNull<{
-      key?: string;
-      name?: string;
-      personal_name?: string;
-      fuller_name?: string;
-      bio?: unknown;
-      birth_date?: string;
-      death_date?: string;
-      photos?: number[];
-      remote_ids?: {
-        wikidata?: string;
-        viaf?: string;
-        isni?: string;
-        goodreads?: string;
-        librarything?: string;
-      };
-      error?: string;
-    }>(url, ctx);
-
-    if (!raw || raw.error === 'notfound' || !raw.key) return null;
+    const resolved = await this.fetchAuthorRecord(authorId, ctx);
+    if (!resolved) return null;
+    const { raw, canonicalId } = resolved;
 
     const bio = extractDescription(raw.bio);
     return {
-      author_id: stripPrefix(raw.key, '/authors/'),
+      author_id: canonicalId,
       name: raw.name ?? '',
       ...(raw.personal_name ? { personal_name: raw.personal_name } : {}),
       ...(raw.fuller_name ? { fuller_name: raw.fuller_name } : {}),
       ...(bio !== undefined ? { bio } : {}),
       ...(raw.birth_date ? { birth_date: raw.birth_date } : {}),
       ...(raw.death_date ? { death_date: raw.death_date } : {}),
-      photo_ids: raw.photos ?? [],
+      photo_ids: sanitizeImageIds(raw.photos),
       remote_ids: {
         ...(raw.remote_ids?.wikidata != null && { wikidata: raw.remote_ids.wikidata }),
         ...(raw.remote_ids?.viaf != null && { viaf: raw.remote_ids.viaf }),
@@ -753,13 +874,17 @@ export class OpenLibraryService {
     };
   }
 
-  async getAuthorWorks(
-    authorId: string,
+  /**
+   * One page of an author's works, or `null` when the subresource reports no
+   * record for that ID. Split out so {@link getAuthorWorks} can retry a second
+   * ID against it without duplicating the mapping.
+   */
+  private async fetchAuthorWorksPage(
+    id: string,
     limit: number,
     offset: number,
     ctx: Context,
   ): Promise<{ total: number; author_id: string; works: AuthorWork[] } | null> {
-    const id = stripPrefix(authorId, '/authors/');
     const url = `${BASE_URL}/authors/${id}/works.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching author works', { authorId: id, limit, offset });
 
@@ -783,9 +908,43 @@ export class OpenLibraryService {
         work_id: stripPrefix(e.key ?? '', '/works/'),
         title: e.title ?? '',
         ...(e.first_publish_date ? { first_publish_date: e.first_publish_date } : {}),
-        cover_ids: e.covers ?? [],
+        cover_ids: sanitizeImageIds(e.covers),
       })),
     };
+  }
+
+  /**
+   * Works by an author, following a merge redirect when the ID has one.
+   *
+   * The works subresource of a merged author 404s even though the author record
+   * itself answers 200, so a null page is ambiguous between "no such author" and
+   * "this ID was merged away". Only that path pays for the author lookup that
+   * tells the two apart — a live author costs exactly one request, as before.
+   *
+   * The returned `author_id` is the ID the works were actually found under, so a
+   * caller that followed a redirect learns the stable ID to use from here on.
+   */
+  async getAuthorWorks(
+    authorId: string,
+    limit: number,
+    offset: number,
+    ctx: Context,
+  ): Promise<{ total: number; author_id: string; works: AuthorWork[] } | null> {
+    const id = normalizeAuthorId(authorId);
+
+    const direct = await this.fetchAuthorWorksPage(id, limit, offset, ctx);
+    if (direct) return direct;
+
+    const resolved = await this.fetchAuthorRecord(id, ctx);
+    // Same ID back means the author resolves but genuinely has no works
+    // subresource — retrying it would just repeat the request that returned null.
+    if (!resolved || resolved.canonicalId === id) return null;
+
+    ctx.log.info('Following author merge redirect for works', {
+      requested: id,
+      canonical: resolved.canonicalId,
+    });
+    return this.fetchAuthorWorksPage(resolved.canonicalId, limit, offset, ctx);
   }
 
   // ─── Subjects ─────────────────────────────────────────────────────────────────

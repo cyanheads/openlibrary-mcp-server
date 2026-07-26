@@ -23,6 +23,7 @@ import {
   EDITION_ENRICHMENT_CONCURRENCY,
   getOpenLibraryService,
   initOpenLibraryService,
+  MAX_AUTHOR_REDIRECT_HOPS,
 } from '@/services/open-library/open-library-service.js';
 
 /** A 404 like Open Library returns for a missing by-ID record (works/authors/editions). */
@@ -612,6 +613,370 @@ describe('OpenLibraryService — edition batch mapping', () => {
     expect(editions[0]?.authors).toEqual([
       { name: 'OL631509A', author_id: 'OL631509A', source: 'work' },
     ]);
+  });
+});
+
+/**
+ * Open Library writes `-1` into `covers`/`photos` as a "no image in this slot"
+ * sentinel instead of omitting the slot. Every fixture below is the real shape:
+ * `https://openlibrary.org/works/OL1812244W.json` returns
+ * `"covers": [9198428, 12156701, -1]`, and `/authors/OL23919A.json` returns
+ * `"photos": [5543033, -1]`.
+ */
+describe('OpenLibraryService — cover and photo sentinel filtering', () => {
+  /** A real sentinel-bearing array, plus the two other unusable entry shapes. */
+  const RAW_COVERS = [9198428, -1, 12156701, 0, null];
+  const USABLE_COVERS = [9198428, 12156701];
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('getWork drops the -1 sentinel, 0, and null from cover_ids', async () => {
+    mockFetchRoutes({
+      '/works/OL1812244W.json': {
+        key: '/works/OL1812244W',
+        title: 'Magicats!',
+        covers: RAW_COVERS,
+      },
+    });
+
+    const work = await getOpenLibraryService().getWork('OL1812244W', createMockContext());
+    expect(work?.cover_ids).toEqual(USABLE_COVERS);
+  });
+
+  it('getEditions drops non-positive cover entries', async () => {
+    mockFetchRoutes({
+      '/editions.json': {
+        size: 1,
+        entries: [{ key: '/books/OL1M', title: 'Ed', covers: RAW_COVERS }],
+      },
+    });
+
+    const result = await getOpenLibraryService().getEditions(
+      'OL1812244W',
+      10,
+      0,
+      createMockContext(),
+    );
+    expect(result?.editions[0]?.cover_ids).toEqual(USABLE_COVERS);
+  });
+
+  it('getEditionsByIdentifiers drops non-positive cover entries', async () => {
+    mockFetchRoutes({
+      '/api/books': {
+        'OLID:OL1M': { details: { key: '/books/OL1M', title: 'Ed', covers: RAW_COVERS } },
+      },
+    });
+
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL1M'],
+      'olid',
+      createMockContext(),
+    );
+    expect(editions[0]?.cover_ids).toEqual(USABLE_COVERS);
+  });
+
+  it('getAuthorWorks drops non-positive cover entries', async () => {
+    mockFetchRoutes({
+      '/works.json': {
+        size: 1,
+        entries: [{ key: '/works/OL1812244W', title: 'Magicats!', covers: RAW_COVERS }],
+      },
+    });
+
+    const result = await getOpenLibraryService().getAuthorWorks(
+      'OL31353A',
+      10,
+      0,
+      createMockContext(),
+    );
+    expect(result?.works[0]?.cover_ids).toEqual(USABLE_COVERS);
+  });
+
+  // The photo path carries the identical sentinel: /authors/OL23919A.json is
+  // `"photos": [5543033, -1]` upstream.
+  it('getAuthor drops the -1 sentinel from photo_ids', async () => {
+    mockFetchRoutes({
+      '/authors/OL23919A.json': {
+        key: '/authors/OL23919A',
+        name: 'Isaac Asimov',
+        photos: [5543033, -1],
+      },
+    });
+
+    const author = await getOpenLibraryService().getAuthor('OL23919A', createMockContext());
+    expect(author?.photo_ids).toEqual([5543033]);
+  });
+
+  // A record whose only entry is the sentinel has no cover at all, and an empty
+  // array already reads that way — the sentinel would not.
+  it('yields an empty array when every entry is a sentinel', async () => {
+    mockFetchRoutes({
+      '/works/OL999W.json': { key: '/works/OL999W', title: 'Coverless', covers: [-1] },
+    });
+
+    const work = await getOpenLibraryService().getWork('OL999W', createMockContext());
+    expect(work?.cover_ids).toEqual([]);
+  });
+
+  it('leaves an all-usable array untouched', async () => {
+    mockFetchRoutes({
+      '/works/OL45804W.json': { key: '/works/OL45804W', title: 'Gatsby', covers: [9255566, 123] },
+    });
+
+    const work = await getOpenLibraryService().getWork('OL45804W', createMockContext());
+    expect(work?.cover_ids).toEqual([9255566, 123]);
+  });
+});
+
+/**
+ * Open Library keeps a merged author as a `/type/redirect` stub: the author
+ * record answers 200 naming its successor while the works subresource 404s.
+ * `OL2162284A` → `OL19981A` (Stephen King) is the live example; the stub body
+ * below is `https://openlibrary.org/authors/OL2162284A.json` verbatim.
+ */
+describe('OpenLibraryService — merged author redirects', () => {
+  const REDIRECT_STUB = {
+    key: '/authors/OL2162284A',
+    type: { key: '/type/redirect' },
+    location: '/authors/OL19981A',
+    latest_revision: 80,
+    revision: 80,
+  };
+
+  const CANONICAL_AUTHOR = {
+    key: '/authors/OL19981A',
+    name: 'Stephen King',
+    type: { key: '/type/author' },
+    // A live author record carries `location: null` — present, not absent. Any
+    // discriminator keyed on `location` existing would misread this as a redirect.
+    location: null,
+    birth_date: '21 September 1947',
+  };
+
+  const CANONICAL_WORKS = {
+    size: 2,
+    entries: [{ key: '/works/OL81634W', title: 'The Shining' }],
+  };
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ─── getAuthorWorks ────────────────────────────────────────────────────────
+
+  it('getAuthorWorks resolves a merged ID to the canonical author, not not_found', async () => {
+    mockFetchRoutes({
+      // The stub's own works subresource is unrouted, so it 404s exactly as upstream.
+      '/authors/OL2162284A.json': REDIRECT_STUB,
+      '/authors/OL19981A.json': CANONICAL_AUTHOR,
+      '/authors/OL19981A/works.json': CANONICAL_WORKS,
+    });
+
+    const result = await getOpenLibraryService().getAuthorWorks(
+      'OL2162284A',
+      10,
+      0,
+      createMockContext(),
+    );
+
+    expect(result).not.toBeNull();
+    // The canonical ID is reported back so the caller learns the stable one.
+    expect(result?.author_id).toBe('OL19981A');
+    expect(result?.works[0]?.work_id).toBe('OL81634W');
+  });
+
+  it('getAuthorWorks follows a chain of two redirects', async () => {
+    mockFetchRoutes({
+      '/authors/OL1A.json': {
+        key: '/authors/OL1A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL2A',
+      },
+      '/authors/OL2A.json': REDIRECT_STUB,
+      '/authors/OL19981A.json': CANONICAL_AUTHOR,
+      '/authors/OL19981A/works.json': CANONICAL_WORKS,
+    });
+
+    const result = await getOpenLibraryService().getAuthorWorks('OL1A', 10, 0, createMockContext());
+    expect(result?.author_id).toBe('OL19981A');
+  });
+
+  /**
+   * The fail-closed cases below all assert the request count as well as the
+   * null: returning null is what the *unfixed* service did for every redirect
+   * too, so the count is what distinguishes "walked the chain and stopped" from
+   * both "never followed it" and "followed it forever".
+   */
+  it('getAuthorWorks walks a chain past the hop cap and stops, rather than looping', async () => {
+    // 20 stubs, each pointing at the next — the chain never reaches an author.
+    const routes: Record<string, unknown> = {};
+    for (let i = 0; i < 20; i++) {
+      routes[`/authors/OL${i}A.json`] = {
+        key: `/authors/OL${i}A`,
+        type: { key: '/type/redirect' },
+        location: `/authors/OL${i + 1}A`,
+      };
+    }
+    const fetchSpy = mockFetchRoutes(routes);
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('OL0A', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+
+    // The works page, then one author fetch per hop up to the cap.
+    const calls = fetchSpy.mock.calls.length;
+    expect(calls).toBeGreaterThan(1);
+    // Uncapped this would walk all 20 stubs.
+    expect(calls).toBeLessThanOrEqual(2 + MAX_AUTHOR_REDIRECT_HOPS);
+  });
+
+  it('getAuthorWorks stops on a circular redirect instead of ping-ponging', async () => {
+    // Both IDs are real OLID shapes (OL<digits>A) so the cycle guard is what
+    // stops this, not the malformed-target check.
+    const fetchSpy = mockFetchRoutes({
+      '/authors/OL1111A.json': {
+        key: '/authors/OL1111A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL2222A',
+      },
+      '/authors/OL2222A.json': {
+        key: '/authors/OL2222A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL1111A',
+      },
+    });
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('OL1111A', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+
+    // Works page + both stubs; the repeat is caught without spending the cap.
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['a null location', null],
+    ['an absent location', undefined],
+    ['a non-author location', '/works/OL45804W'],
+    ['an empty location', ''],
+  ])('getAuthorWorks fails closed on a redirect with %s', async (_label, location) => {
+    const fetchSpy = mockFetchRoutes({
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        ...(location === undefined ? {} : { location }),
+      },
+    });
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('OL2162284A', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+
+    // Works page + the stub. A malformed target is rejected on inspection, never
+    // fetched — a third request would mean the service guessed at a path.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // The redirect lookup is a second request, so it must not be spent on the
+  // overwhelming majority of lookups that never redirect.
+  it('getAuthorWorks costs exactly one request when the author is not merged', async () => {
+    const fetchSpy = mockFetchRoutes({ '/authors/OL19981A/works.json': CANONICAL_WORKS });
+
+    const result = await getOpenLibraryService().getAuthorWorks(
+      'OL19981A',
+      10,
+      0,
+      createMockContext(),
+    );
+
+    expect(result?.author_id).toBe('OL19981A');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // A live author with no works subresource must not send the resolver in a
+  // circle re-requesting the ID it started from.
+  it('getAuthorWorks returns null without retrying when the ID resolves to itself', async () => {
+    const fetchSpy = mockFetchRoutes({ '/authors/OL19981A.json': CANONICAL_AUTHOR });
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('OL19981A', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    // The works page (404) plus the author record — never a third request.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── getAuthor ─────────────────────────────────────────────────────────────
+
+  it('getAuthor returns the canonical record rather than the nameless stub', async () => {
+    mockFetchRoutes({
+      '/authors/OL2162284A.json': REDIRECT_STUB,
+      '/authors/OL19981A.json': CANONICAL_AUTHOR,
+    });
+
+    const author = await getOpenLibraryService().getAuthor('OL2162284A', createMockContext());
+
+    // The stub carries its own `key` and no `name`, so the pre-fix guard passed
+    // it through as an author named ''.
+    expect(author?.name).toBe('Stephen King');
+    expect(author?.author_id).toBe('OL19981A');
+  });
+
+  it('getAuthor treats a live record with location: null as an author, not a redirect', async () => {
+    const fetchSpy = mockFetchRoutes({ '/authors/OL19981A.json': CANONICAL_AUTHOR });
+
+    const author = await getOpenLibraryService().getAuthor('OL19981A', createMockContext());
+
+    expect(author?.name).toBe('Stephen King');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('getAuthor fails closed on a redirect naming no usable target', async () => {
+    mockFetchRoutes({
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        location: null,
+      },
+    });
+
+    await expect(
+      getOpenLibraryService().getAuthor('OL2162284A', createMockContext()),
+    ).resolves.toBeNull();
+  });
+
+  it('getAuthor still reports a genuinely absent author as null', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(notFoundResponse());
+    await expect(
+      getOpenLibraryService().getAuthor('OL999999999999A', createMockContext()),
+    ).resolves.toBeNull();
+  });
+
+  // ─── Resource surface ──────────────────────────────────────────────────────
+
+  it('the author resource inherits the redirect fix', async () => {
+    mockFetchRoutes({
+      '/authors/OL2162284A.json': REDIRECT_STUB,
+      '/authors/OL19981A.json': CANONICAL_AUTHOR,
+    });
+
+    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL2162284A' });
+    const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL2162284A') });
+    const result = await openlibraryAuthorResource.handler(params, ctx);
+
+    expect(result.name).toBe('Stephen King');
+    // The resource has no enrichment channel, so its author_id carrying the
+    // canonical value is the only signal available — and it must carry it.
+    expect(result.author_id).toBe('OL19981A');
   });
 });
 

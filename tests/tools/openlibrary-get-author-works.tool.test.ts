@@ -3,7 +3,7 @@
  * @module tests/tools/openlibrary-get-author-works.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetAuthorWorks } from '@/mcp-server/tools/definitions/openlibrary-get-author-works.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -73,6 +73,45 @@ describe('openlibraryGetAuthorWorks', () => {
 
     const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL99999A' });
     await expect(openlibraryGetAuthorWorks.handler(input, ctx)).rejects.toThrow('Author not found');
+  });
+
+  // `format()` receives only the domain payload, never the input, so it cannot
+  // see that the works came back under a different ID than was requested. The
+  // handler's enrichment notice is the only place to disclose it.
+  it('discloses a merged-ID substitution through the enrichment notice', async () => {
+    const ctx = createMockContext();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getAuthorWorks').mockResolvedValueOnce({
+      total: 2,
+      author_id: 'OL19981A',
+      works: [MOCK_WORK],
+    });
+
+    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL2162284A' });
+    await openlibraryGetAuthorWorks.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('OL2162284A');
+    expect(notice).toContain('OL19981A');
+  });
+
+  it('adds no notice when the works came back under the requested ID', async () => {
+    const ctx = createMockContext();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getAuthorWorks').mockResolvedValueOnce(MOCK_AUTHOR_WORKS_RESULT);
+
+    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A' });
+    await openlibraryGetAuthorWorks.handler(input, ctx);
+
+    // An unguarded enrich call would key `notice` to undefined and render a
+    // literal "undefined" line on every ordinary lookup.
+    expect(getEnrichment(ctx)).not.toHaveProperty('notice');
+    // The total must still be disclosed either way.
+    expect(getEnrichment(ctx).totalCount).toBe(7);
   });
 
   it('applies default limit and offset', () => {

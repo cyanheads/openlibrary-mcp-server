@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 /**
@@ -26,6 +27,11 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
   }),
   output: z.object({
     total: z.number().describe('Total matching authors across all pages.'),
+    offset: z
+      .number()
+      .describe(
+        'Zero-based offset of the first returned result — echoes the requested offset, so an empty page still records the offset that produced it.',
+      ),
     authors: z
       .array(
         z
@@ -66,12 +72,14 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
     totalCount: z
       .number()
       .optional()
-      .describe('Total matching authors across all pages. Absent when results are empty.'),
+      .describe(
+        'Total matching authors across all pages — the upstream match count, reported even when this page is empty because offset ran past the end.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Recovery guidance when no authors match — echoes the query and suggests alternatives. Absent when results are found.',
+        'Guidance when the page is empty (how to vary a name that matched nothing, or which offset to retry when offset ran past the end) or when the text output capped a per-author list. Absent when neither applies.',
       ),
   },
 
@@ -80,36 +88,39 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
     const svc = getOpenLibraryService();
     const result = await svc.searchAuthors(input.query, input.limit, input.offset, ctx);
 
-    if (result.authors.length === 0) {
-      ctx.enrich.notice(
-        `No authors matched "${input.query}". Try a partial name, check spelling, or use an alternate name form.`,
-      );
-      return { total: 0, authors: [] };
-    }
-
+    // Always the upstream match count, including on an empty page: an over-paged
+    // request matched authors, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
-    // Disclose the top subjects that format() caps out of the text; structuredContent keeps all.
-    const subjectsShown = result.authors.reduce(
-      (sum, author) => sum + Math.min(author.top_subjects.length, TOP_SUBJECTS_TEXT_CAP),
-      0,
-    );
-    const subjectsTotal = result.authors.reduce(
-      (sum, author) => sum + author.top_subjects.length,
-      0,
-    );
-    if (subjectsTotal > subjectsShown) {
-      ctx.enrich.notice(
-        `Top subjects are capped at ${TOP_SUBJECTS_TEXT_CAP} per author in text output; showing ${subjectsShown} of ${subjectsTotal}. Full per-author lists are in structuredContent (authors[].top_subjects).`,
-      );
+    if (result.authors.length === 0) {
+      if (result.total > 0) {
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the result set — ${result.total} authors matched "${input.query}", so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the query itself matched.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          `No authors matched "${input.query}". Try a partial name, check spelling, or use an alternate name form.`,
+        );
+      }
+      return { total: result.total, offset: input.offset, authors: [] };
     }
 
-    return result;
+    // Disclose the top subjects that format() caps out of the text; structuredContent keeps all.
+    const capNotice = cappedListNotice(
+      result.authors.map((author) => author.top_subjects.length),
+      TOP_SUBJECTS_TEXT_CAP,
+      { label: 'Top subjects', unit: 'author', path: 'authors[].top_subjects' },
+    );
+    if (capNotice) ctx.enrich.notice(capNotice);
+
+    return { ...result, offset: input.offset };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`**Total:** ${result.total} | **Returned:** ${result.authors.length}`);
+    lines.push(
+      `**Total:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.authors.length}`,
+    );
 
     for (const author of result.authors) {
       lines.push('');

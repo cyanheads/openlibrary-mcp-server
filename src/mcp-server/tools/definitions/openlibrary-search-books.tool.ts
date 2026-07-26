@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
 import { normalizeLanguageCode } from '@/services/open-library/language-codes.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
@@ -15,6 +16,13 @@ import { getOpenLibraryService } from '@/services/open-library/open-library-serv
  * enrichment trailer.
  */
 const IA_TEXT_CAP = 5;
+
+/**
+ * Max subject tags rendered per work in the `content[]` text. Same contract as
+ * {@link IA_TEXT_CAP} — `structuredContent` carries every tag the search
+ * returned, and the trailer names how many the text omits.
+ */
+const SUBJECTS_TEXT_CAP = 5;
 
 export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   title: 'Search Books',
@@ -106,7 +114,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
             subjects: z
               .array(z.string())
               .optional()
-              .describe('Up to 5 subject tags. Absent when no subjects are tagged.'),
+              .describe(
+                "Every subject tag the search index returned for this work. The text output caps the rendered list; this array is complete. Absent when no subjects are tagged. For the work record's own curated subject lists (places, times, people), use openlibrary_get_work.",
+              ),
             ebook_access: z
               .enum(['no_ebook', 'unclassified', 'printdisabled', 'borrowable', 'public'])
               .describe(
@@ -170,12 +180,14 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     totalCount: z
       .number()
       .optional()
-      .describe('Total matching works across all pages. Absent when results are empty.'),
+      .describe(
+        'Total matching works across all pages — the upstream match count, reported even when this page is empty because offset ran past the end.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Recovery guidance when results are empty — echoes the search criteria and suggests how to broaden. Absent when results are found.',
+        'Guidance when the page is empty (how to broaden a query that matched nothing, or which offset to retry when offset ran past the end) or when the text output capped a per-work list. Absent when neither applies.',
       ),
   },
 
@@ -207,32 +219,47 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     if (input.language) filters.push(`language "${normalizeLanguageCode(input.language)}"`);
     const queryEcho = filters.length > 1 ? filters.join(', ') : undefined;
 
-    if (result.works.length === 0) {
-      const hint = filters.length
-        ? `No works matched ${filters.join(', ')}. Try broader or different terms.`
-        : 'No works matched your search. Try different filters or a general query.';
-      // Only echo when there is an effective echo value — keying `queryEcho: undefined`
-      // survives the enrichment parse and renders a literal "undefined" in the trailer.
-      if (queryEcho !== undefined) ctx.enrich({ queryEcho });
-      ctx.enrich.notice(hint);
-      return { total: 0, offset: result.offset, works: [] };
-    }
-
+    // Only echo when there is an effective echo value — keying `queryEcho: undefined`
+    // survives the enrichment parse and renders a literal "undefined" in the trailer.
     if (queryEcho !== undefined) ctx.enrich({ queryEcho });
+    // Always the upstream match count, including on an empty page: an over-paged
+    // request matched works, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
-    // Disclose the Internet Archive identifiers that format() caps out of the text.
-    // structuredContent keeps every id; the notice names how many the text omits.
-    const iaShown = result.works.reduce(
-      (sum, work) => sum + Math.min(work.ia_identifiers.length, IA_TEXT_CAP),
-      0,
-    );
-    const iaTotal = result.works.reduce((sum, work) => sum + work.ia_identifiers.length, 0);
-    if (iaTotal > iaShown) {
-      ctx.enrich.notice(
-        `Internet Archive identifiers are capped at ${IA_TEXT_CAP} per work in text output; showing ${iaShown} of ${iaTotal}. Full per-work lists are in structuredContent (works[].ia_identifiers).`,
-      );
+    if (result.works.length === 0) {
+      if (result.total > 0) {
+        ctx.enrich.notice(
+          `Offset ${result.offset} is past the end of the result set — ${result.total} works matched, so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the search criteria themselves matched.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          filters.length
+            ? `No works matched ${filters.join(', ')}. Try broader or different terms.`
+            : 'No works matched your search. Try different filters or a general query.',
+        );
+      }
+      return { total: result.total, offset: result.offset, works: [] };
     }
+
+    // Disclose what format() caps out of the text; structuredContent keeps every
+    // entry. `notice` is last-wins, so both caps ship as one composed string.
+    const capNotices = [
+      cappedListNotice(
+        result.works.map((work) => work.ia_identifiers.length),
+        IA_TEXT_CAP,
+        {
+          label: 'Internet Archive identifiers',
+          unit: 'work',
+          path: 'works[].ia_identifiers',
+        },
+      ),
+      cappedListNotice(
+        result.works.map((work) => work.subjects?.length ?? 0),
+        SUBJECTS_TEXT_CAP,
+        { label: 'Subjects', unit: 'work', path: 'works[].subjects' },
+      ),
+    ].filter((notice): notice is string => notice !== undefined);
+    if (capNotices.length) ctx.enrich.notice(capNotices.join(' '));
 
     return { total: result.total, offset: result.offset, works: result.works };
   },
@@ -260,7 +287,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       if (work.ratings_average != null) meta.push(`Rating: ${work.ratings_average.toFixed(1)}`);
       lines.push(meta.join(' | '));
       if (work.cover_id != null) lines.push(`**Cover ID:** ${work.cover_id}`);
-      if (work.subjects?.length) lines.push(`**Subjects:** ${work.subjects.join(', ')}`);
+      if (work.subjects?.length) {
+        lines.push(`**Subjects:** ${work.subjects.slice(0, SUBJECTS_TEXT_CAP).join(', ')}`);
+      }
       if (work.ia_identifiers.length) {
         lines.push(`**IA:** ${work.ia_identifiers.slice(0, IA_TEXT_CAP).join(', ')}`);
       }

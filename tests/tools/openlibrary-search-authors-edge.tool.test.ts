@@ -98,7 +98,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
       top_subjects: [],
       // ratings_average absent
     };
-    const output = { total: 1, authors: [author] };
+    const output = { total: 1, offset: 0, authors: [author] };
     const text = (openlibrarySearchAuthors.format!(output)[0] as { text: string }).text;
     expect(text).toContain('OL1A');
     expect(text).not.toContain('Rating:');
@@ -160,7 +160,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
   });
 
   it('formats empty results cleanly', () => {
-    const output = { total: 0, authors: [] };
+    const output = { total: 0, offset: 0, authors: [] };
     const text = (openlibrarySearchAuthors.format!(output)[0] as { text: string }).text;
     expect(text).toContain('Total:** 0');
     expect(text).toContain('Returned:** 0');
@@ -176,7 +176,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
       top_subjects: [],
     };
     const text = (
-      openlibrarySearchAuthors.format!({ total: 1, authors: [author] })[0] as {
+      openlibrarySearchAuthors.format!({ total: 1, offset: 0, authors: [author] })[0] as {
         text: string;
       }
     ).text;

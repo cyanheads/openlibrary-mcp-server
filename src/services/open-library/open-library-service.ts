@@ -235,7 +235,9 @@ export class OpenLibraryService {
         }),
         edition_count: doc.edition_count ?? 0,
         ...(typeof doc.cover_i === 'number' && { cover_id: doc.cover_i }),
-        ...(doc.subject?.length ? { subjects: doc.subject.slice(0, 5) } : {}),
+        // Complete list: the tool caps only the rendered text and discloses the
+        // omitted count, so structuredContent keeps every tag the index returned.
+        ...(doc.subject?.length ? { subjects: doc.subject } : {}),
         ebook_access: ebookAccess,
         has_fulltext: doc.has_fulltext ?? false,
         ...(typeof doc.ratings_average === 'number' && { ratings_average: doc.ratings_average }),
@@ -651,6 +653,12 @@ export class OpenLibraryService {
 
   // ─── Subjects ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Fetches a subject page. Open Library answers any subject key with HTTP 200,
+   * echoing the requested key back as `name` with `work_count: 0` and no works,
+   * so an unknown subject is an empty result rather than an absent record — this
+   * never resolves to `null`, and callers have no not-found path to take.
+   */
   async getSubject(
     subject: string,
     limit: number,
@@ -661,7 +669,7 @@ export class OpenLibraryService {
     subject_key: string;
     work_count: number;
     works: SubjectWork[];
-  } | null> {
+  }> {
     const subjectKey = subject.toLowerCase().replace(/\s+/g, '_');
     const qs = new URLSearchParams({
       limit: String(limit),
@@ -681,10 +689,7 @@ export class OpenLibraryService {
         edition_count?: number;
         cover_id?: number;
       }>;
-      error?: string;
     }>(url, ctx);
-
-    if (raw.error === 'notfound' || (!raw.name && !raw.work_count)) return null;
 
     return {
       subject_name: raw.name ?? subject,

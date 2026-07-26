@@ -3,7 +3,6 @@
  * @module tests/tools/openlibrary-get-subject.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
@@ -36,7 +35,7 @@ describe('openlibraryGetSubject', () => {
   });
 
   it('returns subject with works', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -54,18 +53,29 @@ describe('openlibraryGetSubject', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
-  it('throws not_found via ctx.fail when service returns null', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+  it('treats an unknown subject as an empty result, not a failure', async () => {
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(null);
+    // Open Library answers any subject key with HTTP 200, echoing the key back
+    // with work_count 0 — there is no absent-record shape left to fail on.
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      subject_name: 'zzz_nonexistent_xyz',
+      subject_key: 'zzz_nonexistent_xyz',
+      work_count: 0,
+      works: [],
+    });
 
     const input = openlibraryGetSubject.input.parse({ subject: 'zzz_nonexistent_xyz' });
-    await expect(openlibraryGetSubject.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
-    });
+    const result = await openlibraryGetSubject.handler(input, ctx);
+
+    expect(result.work_count).toBe(0);
+    expect(result.works).toEqual([]);
+  });
+
+  it('declares no error contract — every subject key resolves to a success', () => {
+    expect(openlibraryGetSubject.errors).toBeUndefined();
   });
 
   it('formats subject with all fields', () => {
@@ -98,7 +108,7 @@ describe('openlibraryGetSubject', () => {
   });
 
   it('populates notice enrichment when work_count is 0', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -119,7 +129,14 @@ describe('openlibraryGetSubject', () => {
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('xzqnonexistent');
-    expect(enrichment.notice).toContain('lowercase');
+    // The guidance must be actionable: case and spacing normalize away, so
+    // advising a case change would send the caller back for the same result.
+    expect(enrichment.notice).not.toContain('lowercase');
+    expect(enrichment.notice).not.toContain('case-sensitive');
+    expect(enrichment.notice).toContain('word form');
+    expect(enrichment.notice).toContain('synonym');
+    expect(enrichment.notice).toContain('broader term');
+    expect(enrichment.totalCount).toBe(0);
   });
 
   it('formats empty-result subject correctly', () => {

@@ -3,7 +3,6 @@
  * @module tests/tools/openlibrary-get-subject-edge.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
@@ -40,26 +39,33 @@ describe('openlibraryGetSubject — edge cases and security', () => {
     expect(input.limit).toBe(100);
   });
 
-  // ─── Not found error contract ────────────────────────────────────────────────
+  // ─── Unknown subject ─────────────────────────────────────────────────────────
 
-  it('throws not_found via ctx.fail when service returns null (unknown subject)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+  it('returns a zero-work success for an unknown subject, with actionable guidance', async () => {
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
-    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(null);
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      subject_name: 'zzznomatchzzz',
+      subject_key: 'zzznomatchzzz',
+      work_count: 0,
+      works: [],
+    });
 
     const input = openlibraryGetSubject.input.parse({ subject: 'zzznomatchzzz' });
-    await expect(openlibraryGetSubject.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
-    });
+    const result = await openlibraryGetSubject.handler(input, ctx);
+
+    expect(result.work_count).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).not.toContain('lowercase');
+    expect(enrichment.notice).toContain('word form');
   });
 
   // ─── Unicode subjects ────────────────────────────────────────────────────────
 
   it('handles unicode subject without error', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -78,7 +84,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Injection attempts ──────────────────────────────────────────────────────
 
   it('passes injection-attempt subject to service unchanged', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -98,7 +104,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   });
 
   it('handles subject with special chars in enrichment notice', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -124,7 +130,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Works with covers ──────────────────────────────────────────────────────
 
   it('returns numeric cover_id in works', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const ctx = createMockContext();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

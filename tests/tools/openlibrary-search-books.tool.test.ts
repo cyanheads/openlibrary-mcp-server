@@ -237,4 +237,138 @@ describe('openlibrarySearchBooks', () => {
     const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
     expect(text).not.toContain('**IA:**');
   });
+
+  // ─── Over-paged results (offset past the end) ───────────────────────────────
+
+  it('keeps the upstream total and names the offset problem on an over-paged page', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    // Upstream matched 19 works; offset 500 lands past the end, so the page is
+    // empty while the match count stays nonzero.
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 19,
+      offset: 500,
+      works: [],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({
+      query: 'Neuromancer William Gibson',
+      limit: 2,
+      offset: 500,
+    });
+    const result = await openlibrarySearchBooks.handler(input, ctx);
+
+    expect(result.total).toBe(19);
+    expect(result.offset).toBe(500);
+    expect(result.works).toEqual([]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(19);
+    // The correction is a lower offset, not a different query.
+    expect(enrichment.notice).toContain('500');
+    expect(enrichment.notice).toContain('past the end');
+    expect(enrichment.notice).toContain('18');
+    expect(enrichment.notice).not.toContain('broader');
+    expect(enrichment.notice).not.toContain('No works matched');
+  });
+
+  it('keeps the broaden guidance when nothing matched at all', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({ total: 0, offset: 0, works: [] });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'xyzzy12345nonexistent' });
+    const result = await openlibrarySearchBooks.handler(input, ctx);
+
+    expect(result.total).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('No works matched');
+    expect(enrichment.notice).toContain('broader');
+    expect(enrichment.notice).not.toContain('past the end');
+  });
+
+  // ─── Subject cap: complete in structuredContent, capped in text, disclosed ──
+
+  it('keeps every subject in structuredContent and discloses the text cap', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    // Zero-padded so no tag is a substring prefix of another.
+    const subjects = Array.from({ length: 15 }, (_, i) => `subj-${String(i).padStart(3, '0')}`);
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 1,
+      offset: 0,
+      works: [makeWork({ subjects, ia_identifiers: [] })],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'dune', limit: 1 });
+    const result = await openlibrarySearchBooks.handler(input, ctx);
+
+    expect(result.works[0]!.subjects).toEqual(subjects);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('Subjects are capped at 5');
+    expect(enrichment.notice).toContain('showing 5 of 15');
+    expect(enrichment.notice).toContain('works[].subjects');
+
+    const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('subj-004');
+    expect(text).not.toContain('subj-005');
+    expect(text).not.toContain('subj-014');
+  });
+
+  it('composes both cap disclosures into one notice when subjects and IA ids overflow', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 1,
+      offset: 0,
+      works: [
+        makeWork({
+          subjects: Array.from({ length: 12 }, (_, i) => `s${i}`),
+          ia_identifiers: Array.from({ length: 9 }, (_, i) => `ia${i}`),
+        }),
+      ],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'dune', limit: 1 });
+    await openlibrarySearchBooks.handler(input, ctx);
+
+    // `ctx.enrich.notice` is last-wins, so a second call would erase the first —
+    // both disclosures have to arrive in a single notice string.
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('Internet Archive identifiers are capped at 5');
+    expect(notice).toContain('showing 5 of 9');
+    expect(notice).toContain('Subjects are capped at 5');
+    expect(notice).toContain('showing 5 of 12');
+  });
+
+  it('does not disclose a subject cap when no work exceeds it', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 1,
+      offset: 0,
+      works: [makeWork({ subjects: ['Fiction', 'American literature'], ia_identifiers: [] })],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({ query: 'gatsby', limit: 1 });
+    await openlibrarySearchBooks.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
 });

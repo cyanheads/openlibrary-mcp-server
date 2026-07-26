@@ -4,19 +4,18 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetSubject = tool('openlibrary_get_subject', {
   title: 'Get Subject',
   description:
-    'Browse works by subject. Returns matching works with edition counts and cover IDs, plus the total work count for the subject. Subjects are user-contributed and may be inconsistent ("science fiction", "Science fiction", "SF" are separate tags). Try lowercase forms first.',
+    'Browse works by subject. Returns matching works with edition counts and cover IDs, plus the total work count for the subject. Case and spacing are normalized before lookup, so "Science Fiction" and "science_fiction" are the same request. Subject tags are user-contributed and the vocabulary varies — when a subject returns no works, try a different word form (singular/plural), a synonym, or a broader term.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     subject: z
       .string()
       .describe(
-        'Subject name. Spaces are converted to underscores internally (e.g., "science fiction" → "science_fiction"). Use lowercase for best results.',
+        'Subject name. Normalized before lookup — lowercased with spaces converted to underscores (e.g., "Science Fiction" → "science_fiction") — so varying case or spacing does not change the result.',
       ),
     limit: z
       .number()
@@ -63,16 +62,6 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
       ),
   },
 
-  errors: [
-    {
-      reason: 'not_found',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Subject not found or has no works.',
-      recovery:
-        'Try a broader or alternate subject term (e.g., "fiction" instead of a specific subgenre).',
-    },
-  ],
-
   async handler(input, ctx) {
     ctx.log.info('Fetching subject', {
       subject: input.subject,
@@ -82,14 +71,11 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
     const svc = getOpenLibraryService();
     const result = await svc.getSubject(input.subject, input.limit, input.offset, ctx);
 
-    if (!result)
-      throw ctx.fail('not_found', `Subject "${input.subject}" not found on Open Library.`);
-
     ctx.enrich.total(result.work_count);
 
     if (result.work_count === 0) {
       ctx.enrich.notice(
-        `No works found for subject "${input.subject}". Subjects on Open Library are user-contributed and case-sensitive — try lowercase (e.g., "science fiction"), an alternate form, or a broader term.`,
+        `No works found for subject "${input.subject}". Case and spacing are normalized before lookup, so re-sending the same words in a different case returns this same result — try a different word form (singular/plural), a synonym, or a broader term instead.`,
       );
       return {
         subject_name: result.subject_name,

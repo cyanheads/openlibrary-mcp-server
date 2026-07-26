@@ -65,6 +65,53 @@ describe('openlibrarySearchAuthors', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeDefined();
     expect(enrichment.notice).toContain('xyzzy99nonexistent');
+    expect(enrichment.notice).not.toContain('past the end');
+  });
+
+  it('keeps the upstream total and names the offset problem on an over-paged page', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+
+    // Upstream matched 4304 authors; offset 9999 lands past the end.
+    vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({ total: 4304, authors: [] });
+
+    const input = openlibrarySearchAuthors.input.parse({
+      query: 'gibson',
+      limit: 2,
+      offset: 9999,
+    });
+    const result = await openlibrarySearchAuthors.handler(input, ctx);
+
+    expect(result.total).toBe(4304);
+    // The offset that produced the empty page is on the record.
+    expect(result.offset).toBe(9999);
+    expect(result.authors).toEqual([]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(4304);
+    expect(enrichment.notice).toContain('9999');
+    expect(enrichment.notice).toContain('past the end');
+    expect(enrichment.notice).toContain('4303');
+    expect(enrichment.notice).not.toContain('check spelling');
+  });
+
+  it('echoes the requested offset on a populated page', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({
+      total: 42,
+      authors: [MOCK_AUTHOR],
+    });
+
+    const input = openlibrarySearchAuthors.input.parse({ query: 'tolkien', offset: 10 });
+    const result = await openlibrarySearchAuthors.handler(input, ctx);
+
+    expect(result.offset).toBe(10);
+    expect(result.total).toBe(42);
   });
 
   it('applies default limit and offset', () => {
@@ -74,7 +121,7 @@ describe('openlibrarySearchAuthors', () => {
   });
 
   it('formats authors with all key fields', () => {
-    const output = { total: 1, authors: [MOCK_AUTHOR] };
+    const output = { total: 1, offset: 0, authors: [MOCK_AUTHOR] };
     const blocks = openlibrarySearchAuthors.format!(output);
     const text = (blocks[0] as { text: string }).text;
 
@@ -96,7 +143,7 @@ describe('openlibrarySearchAuthors', () => {
       work_count: 0,
       top_subjects: [],
     };
-    const output = { total: 1, authors: [sparse] };
+    const output = { total: 1, offset: 0, authors: [sparse] };
     const text = (openlibrarySearchAuthors.format!(output)[0] as { text: string }).text;
     expect(text).toContain('OL1A');
     expect(text).toContain('Anonymous');

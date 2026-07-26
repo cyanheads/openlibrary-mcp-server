@@ -297,6 +297,96 @@ describe('OpenLibraryService — searchBooks ebook_access tiers', () => {
   });
 });
 
+describe('OpenLibraryService — searchBooks subject mapping', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** 15 tags — well past the 5 the tool's text output renders. */
+  const MANY_SUBJECTS = Array.from({ length: 15 }, (_, i) => `subject-${i + 1}`);
+
+  it('returns every subject tag, uncapped', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(searchResponse({ subject: MANY_SUBJECTS })),
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'dune', limit: 1, offset: 0 },
+      createMockContext(),
+    );
+
+    expect(result.works[0]?.subjects).toEqual(MANY_SUBJECTS);
+  });
+
+  it('omits subjects entirely when upstream tags none', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(searchResponse({})));
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'dune', limit: 1, offset: 0 },
+      createMockContext(),
+    );
+
+    expect(result.works[0]?.subjects).toBeUndefined();
+  });
+});
+
+describe('OpenLibraryService — getSubject', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Open Library echoes any requested key back with work_count 0 rather than
+  // 404ing, so there is no absent-record shape for this method to report.
+  it('resolves an unknown subject to a zero-work record, never null', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ name: 'zzznotarealsubjectzzz', work_count: 0, works: [] }), {
+          status: 200,
+        }),
+      ),
+    );
+
+    const result = await getOpenLibraryService().getSubject(
+      'zzznotarealsubjectzzz',
+      12,
+      0,
+      createMockContext(),
+    );
+
+    expect(result.work_count).toBe(0);
+    expect(result.works).toEqual([]);
+    expect(result.subject_key).toBe('zzznotarealsubjectzzz');
+  });
+
+  it('normalizes case and spacing into the requested subject key', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ name: 'Science Fiction', work_count: 21127, works: [] }), {
+          status: 200,
+        }),
+      ),
+    );
+
+    const result = await getOpenLibraryService().getSubject(
+      'SCIENCE FICTION',
+      1,
+      0,
+      createMockContext(),
+    );
+
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain('/subjects/science_fiction.json');
+    expect(result.subject_key).toBe('science_fiction');
+  });
+});
+
 describe('OpenLibraryService — edition identifier and author mapping', () => {
   /** OL22855101M — a real record whose lccn and lc_classifications differ. */
   const CONCORDE = {

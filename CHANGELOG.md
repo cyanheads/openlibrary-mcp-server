@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-24 · ⚠️ Breaking
+
+Adopts MCP SDK v2: strict top-level tool inputs, 2026-07-28 HTTP negotiation, and error-envelope-aware output schemas; HTTP sessions default to stateless.
+
 ## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-26
 
 Fix empty-title and empty-name markdown headings rendering as bare heading markers across eight tools, via a shared placeholder module.

@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 22:37:21
+Generated on: 2026-08-25 02:12:09
 
 ```text
 openlibrary-mcp-server/
@@ -14,6 +14,8 @@ openlibrary-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -188,7 +190,8 @@ openlibrary-mcp-server/
 │       ├── openlibrary-search-authors.tool.test.ts
 │       ├── openlibrary-search-books-edge.tool.test.ts
 │       ├── openlibrary-search-books.tool.test.ts
-│       └── openlibrary-search-inside.tool.test.ts
+│       ├── openlibrary-search-inside.tool.test.ts
+│       └── strict-inputs.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

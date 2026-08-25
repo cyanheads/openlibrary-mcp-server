@@ -27,7 +27,7 @@ describe('openlibraryGetAuthorWorks', () => {
   });
 
   it('returns works for valid author_id', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -44,7 +44,7 @@ describe('openlibraryGetAuthorWorks', () => {
   });
 
   it('forwards author_id and pagination to service', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -65,7 +65,7 @@ describe('openlibraryGetAuthorWorks', () => {
   });
 
   it('propagates service errors', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -79,7 +79,7 @@ describe('openlibraryGetAuthorWorks', () => {
   // see that the works came back under a different ID than was requested. The
   // handler's enrichment notice is the only place to disclose it.
   it('discloses a merged-ID substitution through the enrichment notice', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -98,7 +98,7 @@ describe('openlibraryGetAuthorWorks', () => {
   });
 
   it('adds no notice when the works came back under the requested ID', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

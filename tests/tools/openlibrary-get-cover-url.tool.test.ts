@@ -13,52 +13,52 @@ describe('openlibraryGetCoverUrl', () => {
     initOpenLibraryService();
   });
 
-  it('returns correct URL for numeric cover ID (book)', () => {
-    const ctx = createMockContext();
+  it('returns correct URL for numeric cover ID (book)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '9255566',
       id_type: 'id',
       target: 'book',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/b/id/9255566-M.jpg');
     expect(result.note).toContain('placeholder');
   });
 
-  it('returns correct URL for ISBN cover', () => {
-    const ctx = createMockContext();
+  it('returns correct URL for ISBN cover', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '9780743273565',
       id_type: 'isbn',
       target: 'book',
       size: 'L',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/b/isbn/9780743273565-L.jpg');
   });
 
-  it('strips hyphens from ISBN', () => {
-    const ctx = createMockContext();
+  it('strips hyphens from ISBN', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '978-0-7432-7356-5',
       id_type: 'isbn',
       target: 'book',
       size: 'S',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/b/isbn/9780743273565-S.jpg');
   });
 
-  it('returns author photo URL for author target', () => {
-    const ctx = createMockContext();
+  it('returns author photo URL for author target', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '12345',
       id_type: 'id',
       target: 'author',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/a/id/12345-M.jpg');
   });
 

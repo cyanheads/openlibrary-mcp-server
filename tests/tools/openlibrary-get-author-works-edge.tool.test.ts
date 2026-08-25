@@ -71,7 +71,7 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
   // ─── Empty works list ────────────────────────────────────────────────────────
 
   it('handles author with zero works', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -91,7 +91,7 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
   // ─── Prefix stripping in author_id ──────────────────────────────────────────
 
   it('passes /authors/ prefix to service unchanged (service strips it)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

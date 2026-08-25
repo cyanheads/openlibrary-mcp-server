@@ -36,7 +36,7 @@ describe('openlibraryAuthorResource', () => {
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(MOCK_AUTHOR);
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL24638A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL24638A' });
     const result = await openlibraryAuthorResource.handler(params, ctx);
 
     expect(result.author_id).toBe('OL24638A');
@@ -52,7 +52,7 @@ describe('openlibraryAuthorResource', () => {
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(null);
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL999999999A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL999999999A' });
     await expect(openlibraryAuthorResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });

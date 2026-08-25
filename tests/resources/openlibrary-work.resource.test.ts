@@ -33,7 +33,7 @@ describe('openlibraryWorkResource', () => {
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getWork').mockResolvedValueOnce(MOCK_WORK);
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL45804W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL45804W' });
     const result = await openlibraryWorkResource.handler(params, ctx);
 
     expect(result.work_id).toBe('OL45804W');
@@ -47,7 +47,7 @@ describe('openlibraryWorkResource', () => {
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getWork').mockResolvedValueOnce(null);
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL999999999W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL999999999W' });
     await expect(openlibraryWorkResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });

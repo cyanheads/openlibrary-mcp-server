@@ -137,7 +137,7 @@ describe('OpenLibraryService — upstream 404 handling', () => {
       id_type: 'isbn',
     });
 
-    const error = await openlibraryGetEdition.handler(input, ctx).catch((e) => e);
+    const error = await Promise.resolve(openlibraryGetEdition.handler(input, ctx)).catch((e) => e);
     expect(error).toBeInstanceOf(McpError);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
@@ -152,7 +152,7 @@ describe('OpenLibraryService — upstream 404 handling', () => {
     const ctx = createMockContext({ errors: openlibraryGetWork.errors });
     const input = openlibraryGetWork.input.parse({ work_id: 'OL999999999999W' });
 
-    const error = await openlibraryGetWork.handler(input, ctx).catch((e) => e);
+    const error = await Promise.resolve(openlibraryGetWork.handler(input, ctx)).catch((e) => e);
     expect(error).toBeInstanceOf(McpError);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
@@ -162,10 +162,12 @@ describe('OpenLibraryService — upstream 404 handling', () => {
 
   it('surfaces a clean NotFound (not FetchHttpError) through the author resource on a 404', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(notFoundResponse());
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL999999999999A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL999999999999A' });
     const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL999999999999A') });
 
-    const error = await openlibraryAuthorResource.handler(params, ctx).catch((e) => e);
+    const error = await Promise.resolve(openlibraryAuthorResource.handler(params, ctx)).catch(
+      (e) => e,
+    );
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).code).toBe(JsonRpcErrorCode.NotFound);
     // The raw fetch-layer error carried data.errorSource: 'FetchHttpError'; a clean
@@ -969,7 +971,7 @@ describe('OpenLibraryService — merged author redirects', () => {
       '/authors/OL19981A.json': CANONICAL_AUTHOR,
     });
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL2162284A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL2162284A' });
     const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL2162284A') });
     const result = await openlibraryAuthorResource.handler(params, ctx);
 

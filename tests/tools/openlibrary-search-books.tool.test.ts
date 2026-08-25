@@ -7,11 +7,10 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibrarySearchBooks } from '@/mcp-server/tools/definitions/openlibrary-search-books.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import type { SearchWork } from '@/services/open-library/types.js';
 
 /** Builds a minimal work fixture for use in tests. */
-function makeWork(
-  overrides?: Partial<Parameters<typeof openlibrarySearchBooks.format>[0]['works'][0]>,
-) {
+function makeWork(overrides?: Partial<SearchWork>): SearchWork {
   return {
     work_id: 'OL45804W',
     title: 'The Great Gatsby',

@@ -22,8 +22,12 @@ import { NO_NAME, NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 /** A heading marker with nothing after it — the #28 symptom. */
 const BARE_HEADING = /^#{1,6}[ \t]*$/m;
 
-function render(blocks: Array<{ type: string }>): string {
-  return (blocks[0] as { text: string }).text;
+function render(blocks: ReadonlyArray<{ type: string; text?: string }>): string {
+  const first = blocks[0];
+  if (first?.type !== 'text' || first.text === undefined) {
+    throw new Error(`format() produced no leading text block (got ${first?.type ?? 'nothing'})`);
+  }
+  return first.text;
 }
 
 describe('openlibraryGetWork format — empty title', () => {

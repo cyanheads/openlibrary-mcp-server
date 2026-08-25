@@ -54,10 +54,10 @@ describe('security — no env secrets appear in tool output or errors', () => {
     expect(JSON.stringify(result)).not.toContain(SECRET_SENTINEL);
   });
 
-  it('get_cover_url: result does not contain the user-agent sentinel', () => {
-    const ctx = createMockContext();
+  it('get_cover_url: result does not contain the user-agent sentinel', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({ identifier: '123', id_type: 'id' });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(JSON.stringify(result)).not.toContain(SECRET_SENTINEL);
   });
 

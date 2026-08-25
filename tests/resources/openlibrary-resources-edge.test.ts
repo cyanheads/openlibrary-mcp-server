@@ -24,7 +24,7 @@ describe('openlibraryAuthorResource — edge cases', () => {
       new Error('Service unavailable — API returned HTML instead of JSON.'),
     );
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL24638A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL24638A' });
     await expect(openlibraryAuthorResource.handler(params, ctx)).rejects.toThrow(
       'Service unavailable',
     );
@@ -42,7 +42,7 @@ describe('openlibraryAuthorResource — edge cases', () => {
       remote_ids: {},
     });
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL1A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL1A' });
     const result = await openlibraryAuthorResource.handler(params, ctx);
     expect(result.author_id).toBe('OL1A');
     expect(result.name).toBe('Anonymous');
@@ -61,7 +61,7 @@ describe('openlibraryAuthorResource — edge cases', () => {
       remote_ids: {},
     });
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL24638A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL24638A' });
     await openlibraryAuthorResource.handler(params, ctx);
     expect(spy).toHaveBeenCalledWith('OL24638A', ctx);
   });
@@ -77,7 +77,7 @@ describe('openlibraryAuthorResource — edge cases', () => {
     );
     vi.spyOn(svc, 'getAuthor').mockRejectedValueOnce(mcpErr);
 
-    const params = openlibraryAuthorResource.params.parse({ author_id: 'OL999A' });
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL999A' });
     await expect(openlibraryAuthorResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });
@@ -98,7 +98,7 @@ describe('openlibraryWorkResource — edge cases', () => {
       new Error('Service unavailable — API returned HTML instead of JSON.'),
     );
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL45804W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL45804W' });
     await expect(openlibraryWorkResource.handler(params, ctx)).rejects.toThrow(
       'Service unavailable',
     );
@@ -120,7 +120,7 @@ describe('openlibraryWorkResource — edge cases', () => {
       author_ids: [],
     });
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL1W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL1W' });
     const result = await openlibraryWorkResource.handler(params, ctx);
     expect(result.work_id).toBe('OL1W');
     expect(result.subjects).toHaveLength(0);
@@ -142,7 +142,7 @@ describe('openlibraryWorkResource — edge cases', () => {
       author_ids: [],
     });
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL45804W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL45804W' });
     await openlibraryWorkResource.handler(params, ctx);
     expect(spy).toHaveBeenCalledWith('OL45804W', ctx);
   });
@@ -158,7 +158,7 @@ describe('openlibraryWorkResource — edge cases', () => {
     );
     vi.spyOn(svc, 'getWork').mockRejectedValueOnce(mcpErr);
 
-    const params = openlibraryWorkResource.params.parse({ work_id: 'OL999W' });
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL999W' });
     await expect(openlibraryWorkResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });

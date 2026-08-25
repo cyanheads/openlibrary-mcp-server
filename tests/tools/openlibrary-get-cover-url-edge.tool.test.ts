@@ -29,67 +29,67 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
 
   // ─── Size variants ──────────────────────────────────────────────────────────
 
-  it('returns S size URL', () => {
-    const ctx = createMockContext();
+  it('returns S size URL', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '123',
       id_type: 'id',
       size: 'S',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toContain('-S.jpg');
   });
 
-  it('returns L size URL', () => {
-    const ctx = createMockContext();
+  it('returns L size URL', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '123',
       id_type: 'id',
       size: 'L',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toContain('-L.jpg');
   });
 
   // ─── OLID variants ──────────────────────────────────────────────────────────
 
-  it('returns book cover URL for olid id_type', () => {
-    const ctx = createMockContext();
+  it('returns book cover URL for olid id_type', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: 'OL7353617M',
       id_type: 'olid',
       target: 'book',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/b/olid/OL7353617M-M.jpg');
   });
 
-  it('returns author photo URL for olid id_type with author target', () => {
-    const ctx = createMockContext();
+  it('returns author photo URL for olid id_type with author target', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: 'OL24638A',
       id_type: 'olid',
       target: 'author',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toBe('https://covers.openlibrary.org/a/olid/OL24638A-M.jpg');
   });
 
   // ─── URL structure assertions ───────────────────────────────────────────────
 
-  it('always returns HTTPS URL (not HTTP)', () => {
-    const ctx = createMockContext();
+  it('always returns HTTPS URL (not HTTP)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({ identifier: '9999', id_type: 'id' });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url.startsWith('https://')).toBe(true);
   });
 
-  it('URL contains covers.openlibrary.org domain', () => {
-    const ctx = createMockContext();
+  it('URL contains covers.openlibrary.org domain', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({ identifier: '9999', id_type: 'id' });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.url).toContain('covers.openlibrary.org');
   });
 
@@ -138,15 +138,15 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
     });
   });
 
-  it('strips hyphens from ISBN identifier (not from olid or id)', () => {
-    const ctx = createMockContext();
+  it('strips hyphens from ISBN identifier (not from olid or id)', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({
       identifier: '978-0-7432-7356-5',
       id_type: 'isbn',
       target: 'book',
       size: 'M',
     });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     // Hyphens stripped for isbn
     expect(result.url).not.toContain('-978-');
     expect(result.url).toContain('9780743273565');
@@ -238,17 +238,17 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
 
   // ─── Note field ─────────────────────────────────────────────────────────────
 
-  it('note always mentions placeholder', () => {
-    const ctx = createMockContext();
+  it('note always mentions placeholder', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({ identifier: '0', id_type: 'id' });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.note).toContain('placeholder');
   });
 
-  it('note always mentions HTTP 200', () => {
-    const ctx = createMockContext();
+  it('note always mentions HTTP 200', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
     const input = openlibraryGetCoverUrl.input.parse({ identifier: '0', id_type: 'id' });
-    const result = openlibraryGetCoverUrl.handler(input, ctx);
+    const result = await openlibraryGetCoverUrl.handler(input, ctx);
     expect(result.note).toContain('200');
   });
 });

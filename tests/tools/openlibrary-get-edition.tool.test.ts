@@ -251,8 +251,8 @@ describe('openlibraryGetEdition', () => {
     ).text;
     expect(text).toContain('George Orwell');
     expect(text).toContain('from parent work');
-    // Must not be rendered under the plain edition-authors heading.
-    expect(text).not.toContain('**Authors:** George Orwell');
+    // Must not be rendered under the edition-level attribution heading.
+    expect(text).not.toContain('**Authors (recorded on this edition):**');
   });
 
   it('formats sparse edition (no optional fields)', () => {

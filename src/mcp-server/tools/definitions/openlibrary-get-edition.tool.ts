@@ -225,7 +225,9 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       const editionAuthors = edition.authors.filter((a) => a.source === 'edition');
       const workAuthors = edition.authors.filter((a) => a.source === 'work');
       if (editionAuthors.length) {
-        lines.push(`**Authors:** ${editionAuthors.map(renderAuthor).join(', ')}`);
+        lines.push(
+          `**Authors (recorded on this edition):** ${editionAuthors.map(renderAuthor).join(', ')}`,
+        );
       }
       if (workAuthors.length) {
         lines.push(

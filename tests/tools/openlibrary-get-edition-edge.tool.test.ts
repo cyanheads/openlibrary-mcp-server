@@ -41,7 +41,7 @@ async function identifiersSentUpstream(identifier: string, idType: string): Prom
     .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
     .mockResolvedValue({ editions: [FULL_EDITION], unresolved: [] });
   const input = openlibraryGetEdition.input.parse({ identifiers: [identifier], id_type: idType });
-  await openlibraryGetEdition.handler(input, ctx).catch(() => undefined);
+  await Promise.resolve(openlibraryGetEdition.handler(input, ctx)).catch(() => undefined);
   return (spy.mock.calls[0]?.[0] as string[] | undefined) ?? [];
 }
 
@@ -134,7 +134,7 @@ describe('openlibraryGetEdition — edge cases', () => {
     const text = (
       openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
     ).text;
-    expect(text).toContain('**Authors:** Edition Credit (OL1A)');
+    expect(text).toContain('**Authors (recorded on this edition):** Edition Credit (OL1A)');
     expect(text).toContain('from parent work');
     expect(text).toContain('Work Credit (OL2A)');
     expect(text).not.toContain('undefined');

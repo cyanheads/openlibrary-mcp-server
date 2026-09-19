@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,9 +23,11 @@
 
 ---
 
-## Tools
+## Overview
 
-10 tools for working with Open Library's catalog of 20M+ books, editions, authors, and subjects:
+Open Library's catalog of 20M+ books, editions, authors, and subjects, plus full-text search across Internet Archive's scanned books. Search and browse from any MCP client, drill from a work into its editions or an author into their works, and resolve cover and author-photo URLs. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -40,143 +42,152 @@
 | `openlibrary_search_inside` | Full-text search inside the scanned text of Internet Archive books — returns matching items with snippets |
 | `openlibrary_get_cover_url` | Resolve a cover image URL for a book or author photo in S/M/L size — returns a direct HTTPS URL embeddable in markdown |
 
-### `openlibrary_search_books`
+### Resources
 
-Full-text book search across Open Library works.
+| Resource | Description |
+|:---|:---|
+| `openlibrary://works/{work_id}` | Work detail by Open Library Work ID — title, description, subjects, cover IDs, and author IDs as injectable context |
+| `openlibrary://authors/{author_id}` | Author detail by Open Library Author ID — name, bio, dates, photo IDs, and linked external identifiers as injectable context |
 
-- Free-text query with Solr field prefixes: `title:`, `author:`, `subject:`, `publisher:`, `isbn:`, `language:`
-- Dedicated filter parameters for title, author, subject, publisher, ISBN, and language
-- Sort by relevance, newest, oldest, community rating, or edition count
-- Pagination via offset for paging through large result sets
-- Optional live reading availability from Internet Archive (borrow/browse/read status) — adds ~200ms latency; off by default
-- Returns work-level records with edition counts, cover IDs, Internet Archive identifiers, and e-book access status
+Both resources mirror data also available via `openlibrary_get_work` and `openlibrary_get_author` — useful for clients that don't surface MCP resources.
 
----
+## Capability reference
 
-### `openlibrary_get_work`
+### `openlibrary_search_books` <sub>tool</sub>
 
-Fetch a work by Open Library Work ID (OL…W).
-
-- Title, description, subjects, cover IDs, and linked author IDs
-- Works represent the abstract book concept independent of any specific edition
-- Author names are not included — use `openlibrary_get_author` or `openlibrary_search_books` for names
+- Free-text query with Solr field prefixes (`title:`, `author:`, `subject:`, `publisher:`, `isbn:`, `language:`) or dedicated filter parameters; 1–100 results per page (default 10), offset pagination
+- `sort`: `relevance` (default), `new`, `old`, `rating`, `editions`
+- `language` accepts a 3-letter MARC code or a translatable 2-letter ISO code; an untranslatable 2-letter code fails as `unknown_language_code` rather than being silently dropped
+- `include_availability` adds live Internet Archive borrow/read status (~200ms latency), off by default
+- Returns work-level records with edition counts, cover IDs, subjects, and Internet Archive identifiers; `content[]` text caps Internet Archive IDs and subjects at 5 each per work, `structuredContent` carries every one
 
 ---
 
-### `openlibrary_get_editions`
+### `openlibrary_get_work` <sub>tool</sub>
 
-List editions of a work — different publishers, languages, formats, and print runs.
-
-- Returns ISBNs, publisher, language, page count, and edition OLIDs
-- Pagination via offset
-- Use after `openlibrary_get_work` or `openlibrary_search_books` to find a specific printing
-
----
-
-### `openlibrary_get_edition`
-
-Resolve one or more editions by identifier.
-
-- Accepts ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M)
-- Takes 1–50 identifiers per call, all of the same `id_type`, resolved in a single upstream request — a bibliography or shelf export costs one call rather than one per book
-- Pass `id_type "isbn"` for both ISBN-10 and ISBN-13
-- Returns full edition metadata: authors, publisher, language, all identifier types, and the parent work ID
-- Partial success: identifiers that resolve come back in `editions`, the rest in `unresolved` with a reason (`invalid_identifier` for a value that cannot be the given type, `not_found` for one Open Library holds no record for). The call fails only when nothing resolved
+- Fetch by Open Library Work ID (OL…W); a leading `/works/` prefix is stripped
+- Returns title, description, subjects (plus place/time/people breakdowns), cover IDs, and author IDs — no author names (use `openlibrary_get_author` or `openlibrary_search_books`)
+- `content[]` text caps subjects at 10; `structuredContent` carries the complete list
+- `not_found` when the Work ID doesn't exist
 
 ---
 
-### `openlibrary_search_authors`
+### `openlibrary_get_editions` <sub>tool</sub>
 
-Search Open Library authors by name.
-
-- Partial names and alternate names work
-- Returns Open Library Author IDs, names, birth/death dates, top works, and subject associations
-- Use author IDs for `openlibrary_get_author` (bio, remote IDs) or `openlibrary_get_author_works` (list of works)
+- List editions of a work by Work ID (OL…W); 1–100 per page (default 10), offset pagination
+- Returns ISBN-10/13, publisher, language, page count, cover IDs, and edition OLIDs (OL…M) per edition
+- `not_found` when the Work ID doesn't exist
 
 ---
 
-### `openlibrary_get_author`
+### `openlibrary_get_edition` <sub>tool</sub>
 
-Fetch author detail by Open Library Author ID (OL…A).
-
-- Bio, birth/death dates, photo IDs
-- Linked external identifiers: Wikidata, VIAF, ISNI, Goodreads, and LibraryThing
-- Use `openlibrary_search_authors` to find an author ID first
-
----
-
-### `openlibrary_get_author_works`
-
-List works by an author.
-
-- Returns titles, cover IDs, and Work OLIDs for drilling into editions or details
-- Use `openlibrary_get_author` for author bio and details, or `openlibrary_get_editions` to explore specific printings
+- Resolves 1–50 identifiers per call in a single upstream request — every identifier shares one `id_type`: `isbn` (10 or 13 digits), `oclc` (numeric), `lccn` (unchecked), or `olid` (OL…M)
+- Partial success: identifiers that resolve return in `editions` (request order); the rest land in `unresolved` with `invalid_identifier` (malformed, never sent upstream) or `not_found` (well-formed, no record) — the call fails only when nothing resolves
+- Authors come inline — the edition's own credits, or ones marked `source: "work"` recovered from the parent work when the edition itself lists none
+- Returns ISBN-10/13, OCLC, LCCN, LC call numbers, publisher, language, page count, cover IDs, parent work ID, and an Internet Archive `ebook_url` when one exists
 
 ---
 
-### `openlibrary_get_subject`
+### `openlibrary_search_authors` <sub>tool</sub>
 
-Browse works by subject tag.
-
-- Returns matching works with edition counts and cover IDs, plus the total work count for the subject
-- Subjects are user-contributed and may be inconsistent ("science fiction", "Science fiction", "SF" are separate tags)
-- Try lowercase forms first
+- Search by name — partial and alternate names match; 1–100 per page (default 10), offset pagination
+- Returns Author ID (OL…A), alternate names, birth/death dates, top work, work count, top subjects, and average rating
+- `content[]` text caps top subjects at 5 per author; `structuredContent` carries the complete list
 
 ---
 
-### `openlibrary_search_inside`
+### `openlibrary_get_author` <sub>tool</sub>
 
-Full-text search inside books scanned by the Internet Archive.
-
-- Answers "which book contains this passage?" — the one question the metadata tools cannot
-- Quote a phrase for an exact-phrase match; unquoted terms match independently
-- Returns Internet Archive items with the matching passages as snippets and a relevance score
-- Snippets are capped in the text output and complete in `structuredContent`, with the omitted count disclosed
-- Seconds-slow against the live index, an order of magnitude above the metadata endpoints — reach for it deliberately
-- Results key on Internet Archive items, not Open Library works: match the returned `ia_identifier` against the `ia_identifiers` on `openlibrary_search_books` results to reach the catalogue record
+- Fetch by Author ID (OL…A); a leading `/authors/` prefix is stripped
+- Returns bio, birth/death dates, photo IDs, and linked identifiers (Wikidata, VIAF, ISNI, Goodreads, LibraryThing)
+- A merged author ID stays reachable — the response is the canonical record, and an enrichment notice names the canonical ID when it differs from the one requested
+- `not_found` when the Author ID doesn't exist
 
 ---
 
-### `openlibrary_get_cover_url`
+### `openlibrary_get_author_works` <sub>tool</sub>
 
-Resolve a cover image URL for a book or author photo.
+- List works by Author ID (OL…A); 1–100 per page (default 20), offset pagination
+- Returns title, first-publish date, cover IDs, and Work ID (OL…W) per work
+- A merged author ID stays reachable — an enrichment notice names the canonical ID when it differs from the one requested
+- `not_found` when the Author ID doesn't exist
 
-- Returns a direct HTTPS URL in the requested size (S/M/L)
-- URLs can be embedded in markdown as `![cover](url)`
-- The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404, so the identifier format is validated locally first: `id` must be numeric, `isbn` 10 or 13 digits, `olid` an edition OLID (OL…M) for target `book` and an author OLID (OL…A) for target `author`
+---
 
-## Resources
+### `openlibrary_get_subject` <sub>tool</sub>
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `openlibrary://works/{work_id}` | Work detail by Open Library Work ID — title, description, subjects, cover IDs, and author IDs as injectable context |
-| Resource | `openlibrary://authors/{author_id}` | Author detail by Open Library Author ID — name, bio, dates, photo IDs, and linked external identifiers as injectable context |
+- Subject name is normalized before lookup (lowercased, spaces → underscores), so case and spacing never change the result; 1–100 per page (default 12), offset pagination
+- Returns canonical subject name, normalized subject key, total work count, and per-work author names, edition count, and cover ID
+- Empty results carry a recovery notice suggesting a different word form, synonym, or broader term — subject tags are user-contributed and inconsistent
+
+---
+
+### `openlibrary_search_inside` <sub>tool</sub>
+
+- Full-text search across Internet Archive's scanned book text — the only tool that answers "which book contains this passage?"; quote a phrase for an exact match, unquoted terms match independently
+- Seconds-slow against the live index, an order of magnitude above the metadata tools — reach for it deliberately, not as a general book search
+- 1–100 results per page (default 10), offset pagination; each result carries a relevance score comparable only within its own result set
+- Results key on Internet Archive `ia_identifier`, not Open Library work IDs — match it against `ia_identifiers` from `openlibrary_search_books` to reach the catalogue record
+- `content[]` text caps snippets at 3 per item; `structuredContent` carries every snippet
+
+---
+
+### `openlibrary_get_cover_url` <sub>tool</sub>
+
+- Resolves a cover or author-photo URL from `id` (numeric), `isbn` (10 or 13 digits), or `olid` (OL…M for `target: "book"`, OL…A for `target: "author"`); `size` is `S`/`M`/`L` (default `M`)
+- Identifiers are validated locally before any request — path separators, `..`, and control characters fail as `invalid_identifier`, and an author lookup by `isbn` fails as `invalid_target`
+- The Covers API always returns HTTP 200 — a missing cover is a 1×1 placeholder GIF, not an error, which is why local validation exists
+- Output URL is ready to embed directly as `![cover](url)`
+
+---
+
+### `openlibrary://works/{work_id}` <sub>resource</sub>
+
+- Same fields as `openlibrary_get_work`, as injectable `application/json` context for a conversation about a specific book
+- `work_id` comes from `openlibrary_search_books` or `openlibrary_get_author_works`
+
+---
+
+### `openlibrary://authors/{author_id}` <sub>resource</sub>
+
+- Same fields as `openlibrary_get_author`, as injectable `application/json` context for a conversation about a specific author
+- `author_id` comes from `openlibrary_search_authors`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
-
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling across all tools
-- Pluggable auth (`none`, `jwt`, `oauth`)
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 Open Library-specific:
 
-- Complete Open Library REST API integration — Search API, Search Inside (full-text) API, Books API, Authors API, Subjects API, Covers API
-- Configurable `User-Agent` header for well-behaved bot identification per community convention
-- Work → editions → edition drill-down pattern with explicit linking between OLIDs across tools
-- Internet Archive availability lookup (opt-in) for borrow/read status on search results
+- Complete Open Library REST API coverage — Search, Search Inside (full-text), Books, Authors, Subjects, and Covers APIs, plus Internet Archive availability lookups
+- Work → editions and author → works drill-down, with explicit OLID cross-links between tool outputs
+- Configurable `User-Agent` header (`OPENLIBRARY_USER_AGENT`) identifying the server per Open Library's bot-blocking convention
+- Batch edition resolution — up to 50 ISBN/OCLC/LCCN/OLID identifiers in one upstream call, with per-identifier partial-failure reporting
 
 Agent-friendly output:
 
-- Explicit recovery hints on empty results — echoes search criteria and suggests how to broaden
-- All OLID cross-links surfaced in responses so agents can chain tool calls without re-searching
-- Cover URLs rendered as embeddable markdown image syntax
+- Recovery guidance on every empty result — echoes the search criteria and suggests how to broaden a query or which offset to retry
+- Merged-author disclosure — `openlibrary_get_author` and `openlibrary_get_author_works` surface the canonical ID via an enrichment notice when a requested ID was merged
+- Per-item partial failure — `openlibrary_get_edition` returns resolved editions alongside typed `unresolved` reasons instead of failing the whole batch
+- Text-output caps disclosed via enrichment notices (Internet Archive IDs, subjects, snippets) while `structuredContent` always carries the complete list
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://openlibrary.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "openlibrary-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://openlibrary.caseyjhand.com/mcp"
+    }
+  }
+}
+```
 
 ### Self-Hosted / Local
 
@@ -239,7 +250,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js ≥ 24.0.0).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js ≥ 24.0.0).
 - No API key required — Open Library is a free, public API.
 
 ### Installation
@@ -262,29 +273,37 @@ cd openlibrary-mcp-server
 bun install
 ```
 
-## Configuration
+4. **Configure environment (optional):**
 
-All configuration is validated at startup via Zod schemas in `src/config/server-config.ts`. Key environment variables:
+```sh
+cp .env.example .env
+# edit .env to override defaults — no required vars
+```
+
+## Configuration
 
 | Variable | Description | Default |
 |:---|:---|:---|
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted | `/mcp` |
+| `MCP_SESSION_MODE` | HTTP session posture: `stateless`, `stateful`, or `auto`. Overrides the `stateless` declared in `src/index.ts`. | `stateless` |
 | `MCP_PUBLIC_URL` | Public origin override for TLS-terminating reverse-proxy deployments | none |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in Bun-only forced-GC pressure loop (ms). Recommended starting point if heap growth is observed: `60000`. | `0` (disabled) |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `OPENLIBRARY_USER_AGENT` | User-Agent sent with all Open Library API requests. Include a contact email per community convention. | `openlibrary-mcp-server/1.0 (openlibrary@archive.org)` |
+| `OPENLIBRARY_USER_AGENT` | User-Agent sent with all Open Library API requests. Include a contact email per community convention. | `openlibrary-mcp-server casey@caseyjhand.com` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
+
+See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ## Running the server
 
 ### Local development
 
-- **Build and run the production version**:
+- **Build and run the production version:**
 
   ```sh
   # One-time build
@@ -296,21 +315,33 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
   bun run start:stdio
   ```
 
-- **Run checks and tests**:
+- **Run checks and tests:**
+
   ```sh
-  bun run devcheck  # Lints, formats, type-checks, and more
-  bun run test      # Runs the test suite
+  bun run devcheck  # Lint, format, typecheck, security
+  bun run test      # Vitest test suite
+  bun run lint:mcp  # Validate MCP definitions against spec
   ```
+
+### Docker
+
+```sh
+docker build -t openlibrary-mcp-server .
+docker run --rm -p 3010:3010 openlibrary-mcp-server
+```
+
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/openlibrary-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Ten tools across Search, Books, Authors, Subjects, and Covers. |
-| `src/mcp-server/resources` | Resource definitions. Work and Author resources. |
-| `src/services/open-library` | Open Library service layer — API client and domain types. |
+| `src/index.ts` | `createApp()` entry point — registers tools and resources. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `tests/` | Unit and integration tests, mirroring the `src/` structure. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) — ten tools across Search, Books, Authors, Subjects, and Covers. |
+| `src/mcp-server/resources` | Resource definitions (`*.resource.ts`) — Work and Author. |
+| `src/services/open-library` | Open Library service layer — API client and domain types. |
+| `tests/` | Unit and integration tests mirroring the `src/` structure. |
 
 ## Development guide
 
@@ -319,10 +350,11 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for logging, `ctx.state` for storage
 - Register new tools and resources in the `createApp()` arrays
+- Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck

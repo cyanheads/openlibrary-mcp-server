@@ -1,13 +1,17 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "openlibrary-mcp-server",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/openlibrary-mcp-server#readme",
   "repository": "https://github.com/cyanheads/openlibrary-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "open-library", "books", "authors", "isbn"],
   "mcpServers": {
     "openlibrary-mcp-server": {
       "command": "npx",

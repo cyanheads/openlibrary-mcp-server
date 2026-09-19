@@ -14,6 +14,7 @@
   "outdated": {
     "allowlist": ["@cyanheads/mcp-ts-core", "@biomejs/biome", "typescript"]
   },
+  "lint": {},
   "packaging": {
     "pluginManifests": true
   }

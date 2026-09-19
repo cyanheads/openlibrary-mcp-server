@@ -167,6 +167,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       when: 'A 2-letter language value has no MARC equivalent, so no filter could be applied.',
       recovery:
         'Pass a 3-letter MARC language code such as "eng", "fre", "ger", or "spa" instead of the unrecognized value.',
+      // `normalizeLanguageCode` raises this inside the service, below the handler
+      // closure, so no literal `ctx.fail` here names it.
+      thrownBy: 'service',
     },
   ],
 

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-09-19
+
+Adopts mcp-ts-core 0.13.6 — the session posture is declared as stateless in src/index.ts, a malformed tool call is repaired rather than rejected where the intent is unambiguous, and the development skill tree moves from skills/ to framework-skills/ so installing this as a plugin no longer loads it.
+
 ## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-24 · ⚠️ Breaking
 
 Adopts MCP SDK v2: strict top-level tool inputs, 2026-07-28 HTTP negotiation, and error-envelope-aware output schemas; HTTP sessions default to stateless.

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24
+
+Every Open Library lookup now ends inside a 50 s deadline with a classified error, openlibrary_get_edition resolves again through /api/books.json, and work and author IDs resolve only to records of their own type, following merge redirects.
+
 ## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-09-19
 
 Adopts mcp-ts-core 0.13.6 — the session posture is declared as stateless in src/index.ts, a malformed tool call is repaired rather than rejected where the intent is unambiguous, and the development skill tree moves from skills/ to framework-skills/ so installing this as a plugin no longer loads it.

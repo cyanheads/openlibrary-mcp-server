@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 16:58:52
+Generated on: 2026-09-24 21:58:05
 
 ```text
 openlibrary-mcp-server/
@@ -26,6 +26,7 @@ openlibrary-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -157,7 +158,8 @@ openlibrary-mcp-server/
 │   │       │   ├── openlibrary-search-books.tool.ts
 │   │       │   └── openlibrary-search-inside.tool.ts
 │   │       ├── capped-list-notice.ts
-│   │       └── heading-placeholders.ts
+│   │       ├── heading-placeholders.ts
+│   │       └── work-id.ts
 │   ├── services/
 │   │   └── open-library/
 │   │       ├── language-codes.ts
@@ -173,6 +175,7 @@ openlibrary-mcp-server/
 │   ├── security/
 │   │   └── security.test.ts
 │   ├── services/
+│   │   ├── open-library-fetch-policy.test.ts
 │   │   └── open-library-service.test.ts
 │   └── tools/
 │       ├── empty-heading-placeholders.tool.test.ts

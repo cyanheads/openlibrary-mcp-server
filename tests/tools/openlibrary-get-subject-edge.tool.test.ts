@@ -3,8 +3,8 @@
  * @module tests/tools/openlibrary-get-subject-edge.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
@@ -170,7 +170,8 @@ describe('openlibraryGetSubject — edge cases and security', () => {
         },
       ],
     };
-    const text = (openlibraryGetSubject.format!(result)[0] as { text: string }).text;
+    const text = (openlibraryGetSubject.format!({ ...result, offset: 0 })[0] as { text: string })
+      .text;
     expect(text).toContain('999');
     expect(text).toContain('Returned:** 1');
     expect(text).toContain('Mr. Dark');
@@ -191,8 +192,82 @@ describe('openlibraryGetSubject — edge cases and security', () => {
         },
       ],
     };
-    const text = (openlibraryGetSubject.format!(result)[0] as { text: string }).text;
+    const text = (openlibraryGetSubject.format!({ ...result, offset: 0 })[0] as { text: string })
+      .text;
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
+  });
+});
+
+describe('openlibraryGetSubject — offset echo', () => {
+  /** A `subjects/{key}.json` page as Open Library returns it. */
+  function subjectPage(workCount: number, count: number): Response {
+    return new Response(
+      JSON.stringify({
+        name: 'science fiction',
+        work_count: workCount,
+        works: Array.from({ length: count }, (_, i) => ({
+          key: `/works/OL${i + 1}W`,
+          title: `Work ${i + 1}`,
+          authors: [{ name: 'Someone' }],
+          edition_count: 1,
+        })),
+      }),
+      { status: 200 },
+    );
+  }
+
+  function contentText(result: { content: unknown[] }): string {
+    return result.content
+      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+      .join('\n');
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['the default offset', undefined, 2, 0],
+    ['a mid-list offset', 5, 2, 5],
+    ['an offset past the end', 100_000, 0, 100_000],
+  ])('echoes %s on both surfaces', async (_label, offset, returned, expected) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(subjectPage(21208, returned));
+
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'Science Fiction',
+      limit: 2,
+      ...(offset === undefined ? {} : { offset }),
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetSubject.output.parse(result.structuredContent);
+    expect(structured.offset).toBe(expected);
+    expect(structured.works).toHaveLength(returned);
+    expect(contentText(result)).toContain(
+      `**Key:** science_fiction | **Total works:** 21208 | **Offset:** ${expected} | **Returned:** ${returned}`,
+    );
+  });
+
+  // An unknown subject takes the handler's separate work_count === 0 return.
+  it('echoes the offset on the empty-subject path', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(subjectPage(0, 0));
+
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'zzznotasubject',
+      offset: 24,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetSubject.output.parse(result.structuredContent);
+    expect(structured.offset).toBe(24);
+    expect(structured.work_count).toBe(0);
+    expect(contentText(result)).toContain('**Total works:** 0 | **Offset:** 24 | **Returned:** 0');
+    expect((result.structuredContent as { notice?: string }).notice).toContain('zzznotasubject');
   });
 });

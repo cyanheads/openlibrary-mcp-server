@@ -31,6 +31,11 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
     subject_name: z.string().describe('Canonical subject name as stored on Open Library.'),
     subject_key: z.string().describe('Normalized subject key (lowercase, underscores).'),
     work_count: z.number().describe('Total works tagged with this subject.'),
+    offset: z
+      .number()
+      .describe(
+        'Zero-based offset of the first returned result — echoes the requested offset, so an empty page still records the offset that produced it.',
+      ),
     works: z
       .array(
         z
@@ -82,18 +87,20 @@ export const openlibraryGetSubject = tool('openlibrary_get_subject', {
         subject_name: result.subject_name,
         subject_key: result.subject_key,
         work_count: 0,
+        offset: input.offset,
         works: [],
       };
     }
 
-    return result;
+    // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
+    return { ...result, offset: input.offset };
   },
 
   format: (result) => {
     const lines: string[] = [];
     lines.push(`## Subject: ${result.subject_name}`);
     lines.push(
-      `**Key:** ${result.subject_key} | **Total works:** ${result.work_count} | **Returned:** ${result.works.length}`,
+      `**Key:** ${result.subject_key} | **Total works:** ${result.work_count} | **Offset:** ${result.offset} | **Returned:** ${result.works.length}`,
     );
 
     for (const work of result.works) {

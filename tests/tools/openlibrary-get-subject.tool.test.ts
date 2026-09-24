@@ -79,7 +79,7 @@ describe('openlibraryGetSubject', () => {
   });
 
   it('formats subject with all fields', () => {
-    const blocks = openlibraryGetSubject.format!(SUBJECT_RESULT);
+    const blocks = openlibraryGetSubject.format!({ ...SUBJECT_RESULT, offset: 0 });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Science Fiction');
     expect(text).toContain('science_fiction');
@@ -96,7 +96,8 @@ describe('openlibraryGetSubject', () => {
       ...SUBJECT_RESULT,
       works: [{ work_id: 'OL3W', title: 'No Cover', author_names: [], edition_count: 5 }],
     };
-    const text = (openlibraryGetSubject.format!(result)[0] as { text: string }).text;
+    const text = (openlibraryGetSubject.format!({ ...result, offset: 0 })[0] as { text: string })
+      .text;
     expect(text).toContain('OL3W');
     expect(text).toContain('No Cover');
   });
@@ -146,7 +147,7 @@ describe('openlibraryGetSubject', () => {
       work_count: 0,
       works: [] as typeof SUBJECT_RESULT.works,
     };
-    const blocks = openlibraryGetSubject.format!(emptyResult);
+    const blocks = openlibraryGetSubject.format!({ ...emptyResult, offset: 0 });
     const text = (blocks[0] as { text: string }).text;
     // format() shows header and zero counts; notice is in enrichment trailer
     expect(text).toContain('xzqnonexistent');

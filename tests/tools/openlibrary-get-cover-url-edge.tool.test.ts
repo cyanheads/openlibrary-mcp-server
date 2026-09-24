@@ -152,6 +152,49 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
     expect(result.url).toContain('9780743273565');
   });
 
+  // ─── ISBN-10 X check digit ──────────────────────────────────────────────────
+
+  it.each(['080442957X', '080442957x', '0-8044-2957-X'])(
+    'accepts the ISBN-10 %s with an X check digit and builds the canonical URL',
+    async (identifier) => {
+      const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+      const input = openlibraryGetCoverUrl.input.parse({ identifier, id_type: 'isbn' });
+      const result = await openlibraryGetCoverUrl.handler(input, ctx);
+      expect(result.url).toBe('https://covers.openlibrary.org/b/isbn/080442957X-M.jpg');
+    },
+  );
+
+  it.each(['08044X9570', 'X804429570', '080442957XX', '978080442957X'])(
+    'rejects %s — an X anywhere but an ISBN-10 check digit',
+    (identifier) => {
+      const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+      const input = openlibraryGetCoverUrl.input.parse({ identifier, id_type: 'isbn' });
+      expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_identifier' },
+      });
+    },
+  );
+
+  it('accepts an X check digit at the service seam too', () => {
+    expect(getOpenLibraryService().getCoverUrl('080442957x', 'isbn', 'book', 'S')).toBe(
+      'https://covers.openlibrary.org/b/isbn/080442957X-S.jpg',
+    );
+  });
+
+  it('names the X check digit wherever the ISBN shape is stated', () => {
+    const recovery = openlibraryGetCoverUrl.errors!.find(
+      (e) => e.reason === 'invalid_identifier',
+    )!.recovery;
+    expect(recovery).toContain('X');
+    expect(openlibraryGetCoverUrl.input.shape.identifier.description).toContain('X check digit');
+    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
+    const input = openlibraryGetCoverUrl.input.parse({ identifier: '12345', id_type: 'isbn' });
+    expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
+      message: expect.stringContaining('X check digit'),
+    });
+  });
+
   // Hyphens are an ISBN convention only — an OLID carrying one is malformed, and
   // passing it through built a URL that could only ever serve the placeholder.
   it('rejects a hyphenated OLID rather than passing it through into the URL', () => {

@@ -14,13 +14,13 @@ import {
 export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
   title: 'Get Cover URL',
   description:
-    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404 — so the identifier format is validated locally first: "id" must be numeric, "isbn" 10 or 13 digits, "olid" an edition OLID (OL…M) for target "book" and an author OLID (OL…A) for target "author". Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected before any request. URLs can be embedded in markdown as ![cover](url).',
+    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404 — so the identifier format is validated locally first: "id" must be numeric, "isbn" 10 or 13 digits (an ISBN-10 may end in an X check digit), "olid" an edition OLID (OL…M) for target "book" and an author OLID (OL…A) for target "author". Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected before any request. URLs can be embedded in markdown as ![cover](url).',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     identifier: z
       .string()
       .describe(
-        'The identifier value, validated against id_type before the URL is built. For "id": a numeric cover or photo ID from work/edition/author data. For "isbn": 10 or 13 digits, hyphens optional. For "olid": an edition OLID (OL…M) for target "book", an author OLID (OL…A) for target "author".',
+        'The identifier value, validated against id_type before the URL is built. For "id": a numeric cover or photo ID from work/edition/author data. For "isbn": 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For "olid": an edition OLID (OL…M) for target "book", an author OLID (OL…A) for target "author".',
       ),
     id_type: z
       .enum(['id', 'isbn', 'olid'])
@@ -59,7 +59,7 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The identifier contains path separators, "..", or control characters, or does not match the format its id_type expects.',
       recovery:
-        'Pass a bare identifier with no slashes or path segments, matching its id_type: a numeric ID for "id", 10 or 13 digits for "isbn", OL…M for "olid" with target "book", OL…A for "olid" with target "author".',
+        'Pass a bare identifier with no slashes or path segments, matching its id_type: a numeric ID for "id", 10 or 13 digits for "isbn" (an ISBN-10 may end in X), OL…M for "olid" with target "book", OL…A for "olid" with target "author".',
     },
     {
       reason: 'invalid_target',

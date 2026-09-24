@@ -16,21 +16,30 @@ export type SearchWork = {
   ebook_access: 'no_ebook' | 'unclassified' | 'printdisabled' | 'borrowable' | 'public';
   has_fulltext: boolean;
   ratings_average?: number;
-  /** Present when include_availability is true; null when work has no IA item. */
+  /**
+   * Present when include_availability is true; null when Open Library returned
+   * no availability for the work (always the case without an IA item, and
+   * sometimes the case with one).
+   */
   availability?: WorkAvailability | null | undefined;
   ia_identifiers: string[];
 };
 
-/** Reading availability from Internet Archive. */
+/**
+ * Reading availability from Internet Archive. Upstream leaves flags null or
+ * absent on some works, so every flag is optional — an omitted flag is unknown,
+ * never `false`. `status` is always present: `"unknown"` when upstream sent
+ * none, and a bare `"error"` when the lending lookup failed.
+ */
 export type WorkAvailability = {
   status: string;
-  available_to_browse: boolean;
-  available_to_borrow: boolean;
-  available_to_waitlist: boolean;
-  is_readable: boolean;
-  is_lendable: boolean;
-  is_previewable: boolean;
-  is_restricted: boolean;
+  available_to_browse?: boolean;
+  available_to_borrow?: boolean;
+  available_to_waitlist?: boolean;
+  is_readable?: boolean;
+  is_lendable?: boolean;
+  is_previewable?: boolean;
+  is_restricted?: boolean;
   openlibrary_edition?: string;
 };
 
@@ -93,6 +102,18 @@ export type EditionDetail = {
   cover_ids: number[];
   work_id?: string | undefined;
   ebook_url?: string | undefined;
+};
+
+/**
+ * Editions in a batch whose author enrichment fell short, by edition ID.
+ * `failed` = a work or author lookup for the edition failed upstream;
+ * `skipped` = its lookups were not issued because an earlier one in the batch
+ * had failed, or the call's time budget ran out. Such an edition has no
+ * authors, or credits named by author ID.
+ */
+export type AuthorLookupGaps = {
+  failed: string[];
+  skipped: string[];
 };
 
 /** Author search result. */

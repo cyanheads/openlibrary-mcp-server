@@ -37,9 +37,11 @@ const FULL_EDITION = {
  */
 async function identifiersSentUpstream(identifier: string, idType: string): Promise<string[]> {
   const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
-  const spy = vi
-    .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
-    .mockResolvedValue({ editions: [FULL_EDITION], unresolved: [] });
+  const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+    editions: [FULL_EDITION],
+    unresolved: [],
+    authorGaps: { failed: [], skipped: [] },
+  });
   const input = openlibraryGetEdition.input.parse({ identifiers: [identifier], id_type: idType });
   await Promise.resolve(openlibraryGetEdition.handler(input, ctx)).catch(() => undefined);
   return (spy.mock.calls[0]?.[0] as string[] | undefined) ?? [];
@@ -69,6 +71,30 @@ describe('openlibraryGetEdition — edge cases', () => {
 
   it('rejects ISBN-11 (non-standard length)', async () => {
     expect(await identifiersSentUpstream('12345678901', 'isbn')).toEqual([]);
+  });
+
+  it.each(['080442957X', '080442957x', '0-8044-2957-X'])(
+    'accepts the ISBN-10 %s with an X check digit, echoed as supplied',
+    async (identifier) => {
+      expect(await identifiersSentUpstream(identifier, 'isbn')).toEqual([identifier]);
+    },
+  );
+
+  it.each(['08044X9570', 'X804429570', '080442957XX', '978080442957X'])(
+    'rejects %s — an X anywhere but an ISBN-10 check digit',
+    async (identifier) => {
+      expect(await identifiersSentUpstream(identifier, 'isbn')).toEqual([]);
+    },
+  );
+
+  it('names the X check digit wherever the ISBN shape is stated', () => {
+    const recovery = openlibraryGetEdition.errors!.find(
+      (e) => e.reason === 'invalid_identifier',
+    )!.recovery;
+    expect(recovery).toContain('X');
+    expect(openlibraryGetEdition.input.shape.identifiers.element.description).toContain(
+      'X check digit',
+    );
   });
 
   // ─── OLID validation ────────────────────────────────────────────────────────

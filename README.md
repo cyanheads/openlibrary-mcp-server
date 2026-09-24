@@ -58,33 +58,37 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 - Free-text query with Solr field prefixes (`title:`, `author:`, `subject:`, `publisher:`, `isbn:`, `language:`) or dedicated filter parameters; 1–100 results per page (default 10), offset pagination
 - `sort`: `relevance` (default), `new`, `old`, `rating`, `editions`
 - `language` accepts a 3-letter MARC code or a translatable 2-letter ISO code; an untranslatable 2-letter code fails as `unknown_language_code` rather than being silently dropped
-- `include_availability` adds live Internet Archive borrow/read status (~200ms latency), off by default
+- `include_availability` adds live Internet Archive borrow/read status (~200ms latency), off by default; flags Open Library leaves out are omitted rather than reported as `false`, and `availability: null` means none was returned for the work
 - Returns work-level records with edition counts, cover IDs, subjects, and Internet Archive identifiers; `content[]` text caps Internet Archive IDs and subjects at 5 each per work, `structuredContent` carries every one
 
 ---
 
 ### `openlibrary_get_work` <sub>tool</sub>
 
-- Fetch by Open Library Work ID (OL…W); a leading `/works/` prefix is stripped
+- Fetch by Open Library Work ID (OL…W), optionally `/works/`-prefixed; anything else — an ISBN, an edition or author OLID — fails input validation before any request, naming `openlibrary_get_edition` (`id_type: "isbn"`) as the route from an ISBN to its work
 - Returns title, description, subjects (plus place/time/people breakdowns), cover IDs, and author IDs — no author names (use `openlibrary_get_author` or `openlibrary_search_books`)
+- A merged work ID stays reachable — the redirect chain is followed to the canonical record, `work_id` reports the canonical ID, and an enrichment notice names both IDs when they differ
 - `content[]` text caps subjects at 10; `structuredContent` carries the complete list
-- `not_found` when the Work ID doesn't exist
+- `not_found` when the Work ID doesn't exist or its redirect chain reaches no work
 
 ---
 
 ### `openlibrary_get_editions` <sub>tool</sub>
 
-- List editions of a work by Work ID (OL…W); 1–100 per page (default 10), offset pagination
+- List editions of a work by Work ID (OL…W), optionally `/works/`-prefixed; 1–100 per page (default 10), offset pagination, with the requested `offset` echoed in the output
+- Same `work_id` validation as `openlibrary_get_work` — an ISBN resolves to its work through `openlibrary_get_edition` (`id_type: "isbn"`)
 - Returns ISBN-10/13, publisher, language, page count, cover IDs, and edition OLIDs (OL…M) per edition
-- `not_found` when the Work ID doesn't exist
+- A merged work ID stays reachable — the editions of the canonical work come back under its ID in `work_id`, with an enrichment notice naming both IDs; a live work still costs one request
+- `not_found` when the Work ID doesn't exist or its redirect chain reaches no work
 
 ---
 
 ### `openlibrary_get_edition` <sub>tool</sub>
 
-- Resolves 1–50 identifiers per call in a single upstream request — every identifier shares one `id_type`: `isbn` (10 or 13 digits), `oclc` (numeric), `lccn` (unchecked), or `olid` (OL…M)
+- Resolves 1–50 identifiers per call in a single upstream request — every identifier shares one `id_type`: `isbn` (10 or 13 digits, an ISBN-10 may end in an `X` check digit), `oclc` (numeric), `lccn` (unchecked), or `olid` (OL…M)
 - Partial success: identifiers that resolve return in `editions` (request order); the rest land in `unresolved` with `invalid_identifier` (malformed, never sent upstream) or `not_found` (well-formed, no record) — the call fails only when nothing resolves
-- Authors come inline — the edition's own credits, or ones marked `source: "work"` recovered from the parent work when the edition itself lists none
+- `upstream_unavailable` (retryable) when Open Library's batch lookup itself fails — an HTTP error status other than a rate limit, or an HTML page — so an upstream outage never reads as a missing edition
+- Authors come inline — the edition's own credits, or ones marked `source: "work"` recovered from the parent work when the edition itself lists none; if those lookups fail, the batch still returns, and an enrichment notice names the editions whose authors are missing or shown by ID
 - Returns ISBN-10/13, OCLC, LCCN, LC call numbers, publisher, language, page count, cover IDs, parent work ID, and an Internet Archive `ebook_url` when one exists
 
 ---
@@ -102,22 +106,22 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 - Fetch by Author ID (OL…A); a leading `/authors/` prefix is stripped
 - Returns bio, birth/death dates, photo IDs, and linked identifiers (Wikidata, VIAF, ISNI, Goodreads, LibraryThing)
 - A merged author ID stays reachable — the response is the canonical record, and an enrichment notice names the canonical ID when it differs from the one requested
-- `not_found` when the Author ID doesn't exist
+- `not_found` when the Author ID doesn't exist, names a record that is not an author (a work or edition OLID), or its redirect chain reaches no author
 
 ---
 
 ### `openlibrary_get_author_works` <sub>tool</sub>
 
-- List works by Author ID (OL…A); 1–100 per page (default 20), offset pagination
+- List works by Author ID (OL…A); 1–100 per page (default 20), offset pagination, with the requested `offset` echoed in the output
 - Returns title, first-publish date, cover IDs, and Work ID (OL…W) per work
 - A merged author ID stays reachable — an enrichment notice names the canonical ID when it differs from the one requested
-- `not_found` when the Author ID doesn't exist
+- `not_found` when the Author ID doesn't exist, names a record that is not an author (a work or edition OLID), or its redirect chain reaches no author
 
 ---
 
 ### `openlibrary_get_subject` <sub>tool</sub>
 
-- Subject name is normalized before lookup (lowercased, spaces → underscores), so case and spacing never change the result; 1–100 per page (default 12), offset pagination
+- Subject name is normalized before lookup (lowercased, spaces → underscores), so case and spacing never change the result; 1–100 per page (default 12), offset pagination, with the requested `offset` echoed in the output
 - Returns canonical subject name, normalized subject key, total work count, and per-work author names, edition count, and cover ID
 - Empty results carry a recovery notice suggesting a different word form, synonym, or broader term — subject tags are user-contributed and inconsistent
 
@@ -126,16 +130,17 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 ### `openlibrary_search_inside` <sub>tool</sub>
 
 - Full-text search across Internet Archive's scanned book text — the only tool that answers "which book contains this passage?"; quote a phrase for an exact match, unquoted terms match independently
-- Seconds-slow against the live index, an order of magnitude above the metadata tools — reach for it deliberately, not as a general book search
+- Usually takes 10–30 s against the live index, far above the metadata tools — reach for it deliberately, not as a general book search
 - 1–100 results per page (default 10), offset pagination; each result carries a relevance score comparable only within its own result set
 - Results key on Internet Archive `ia_identifier`, not Open Library work IDs — match it against `ia_identifiers` from `openlibrary_search_books` to reach the catalogue record
 - `content[]` text caps snippets at 3 per item; `structuredContent` carries every snippet
+- `upstream_unavailable` (retryable) when the index answers without a result set, so a failed search never reads as "no book contains this"
 
 ---
 
 ### `openlibrary_get_cover_url` <sub>tool</sub>
 
-- Resolves a cover or author-photo URL from `id` (numeric), `isbn` (10 or 13 digits), or `olid` (OL…M for `target: "book"`, OL…A for `target: "author"`); `size` is `S`/`M`/`L` (default `M`)
+- Resolves a cover or author-photo URL from `id` (numeric), `isbn` (10 or 13 digits, an ISBN-10 may end in an `X` check digit), or `olid` (OL…M for `target: "book"`, OL…A for `target: "author"`); `size` is `S`/`M`/`L` (default `M`)
 - Identifiers are validated locally before any request — path separators, `..`, and control characters fail as `invalid_identifier`, and an author lookup by `isbn` fails as `invalid_target`
 - The Covers API always returns HTTP 200 — a missing cover is a 1×1 placeholder GIF, not an error, which is why local validation exists
 - Output URL is ready to embed directly as `![cover](url)`
@@ -145,14 +150,14 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 ### `openlibrary://works/{work_id}` <sub>resource</sub>
 
 - Same fields as `openlibrary_get_work`, as injectable `application/json` context for a conversation about a specific book
-- `work_id` comes from `openlibrary_search_books` or `openlibrary_get_author_works`
+- `work_id` comes from `openlibrary_search_books` or `openlibrary_get_author_works`; a merged ID resolves to the canonical work, whose ID the returned `work_id` carries, and an ID that is not a work (an edition or author OLID) is not found
 
 ---
 
 ### `openlibrary://authors/{author_id}` <sub>resource</sub>
 
 - Same fields as `openlibrary_get_author`, as injectable `application/json` context for a conversation about a specific author
-- `author_id` comes from `openlibrary_search_authors`
+- `author_id` comes from `openlibrary_search_authors`; a merged ID resolves to the canonical author, whose ID the returned `author_id` carries, and an ID that is not an author (a work or edition OLID) is not found
 
 ## Features
 
@@ -164,11 +169,12 @@ Open Library-specific:
 - Work → editions and author → works drill-down, with explicit OLID cross-links between tool outputs
 - Configurable `User-Agent` header (`OPENLIBRARY_USER_AGENT`) identifying the server per Open Library's bot-blocking convention
 - Batch edition resolution — up to 50 ISBN/OCLC/LCCN/OLID identifiers in one upstream call, with per-identifier partial-failure reporting
+- Timeouts sized per endpoint class (10 s record lookups, 30 s searches, 45 s full-text) inside a 50 s retry budget, so a slow upstream is waited on and a failing one returns a classified error before a typical 60 s client timeout; gateway errors are not retried in a loop
 
 Agent-friendly output:
 
 - Recovery guidance on every empty result — echoes the search criteria and suggests how to broaden a query or which offset to retry
-- Merged-author disclosure — `openlibrary_get_author` and `openlibrary_get_author_works` surface the canonical ID via an enrichment notice when a requested ID was merged
+- Merged-record disclosure — `openlibrary_get_author`, `openlibrary_get_author_works`, `openlibrary_get_work`, and `openlibrary_get_editions` follow merge redirects and surface the canonical ID via an enrichment notice when a requested ID was merged
 - Per-item partial failure — `openlibrary_get_edition` returns resolved editions alongside typed `unresolved` reasons instead of failing the whole batch
 - Text-output caps disclosed via enrichment notices (Internet Archive IDs, subjects, snippets) while `structuredContent` always carries the complete list
 

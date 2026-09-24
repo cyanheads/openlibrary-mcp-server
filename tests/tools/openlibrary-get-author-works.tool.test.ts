@@ -121,7 +121,7 @@ describe('openlibraryGetAuthorWorks', () => {
   });
 
   it('formats works with all key fields', () => {
-    const blocks = openlibraryGetAuthorWorks.format!(MOCK_AUTHOR_WORKS_RESULT);
+    const blocks = openlibraryGetAuthorWorks.format!({ ...MOCK_AUTHOR_WORKS_RESULT, offset: 0 });
     const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('OL24638A');
@@ -144,7 +144,9 @@ describe('openlibraryGetAuthorWorks', () => {
         },
       ],
     };
-    const text = (openlibraryGetAuthorWorks.format!(sparse)[0] as { text: string }).text;
+    const text = (
+      openlibraryGetAuthorWorks.format!({ ...sparse, offset: 0 })[0] as { text: string }
+    ).text;
     expect(text).toContain('OL1W');
     expect(text).toContain('Sparse Work');
   });

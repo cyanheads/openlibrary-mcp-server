@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
 import {
@@ -39,6 +39,9 @@ const SECOND_EDITION = {
   isbn_13: ['9782952690607'],
 };
 
+/** A batch whose author enrichment completed. */
+const NO_GAPS = { failed: [], skipped: [] };
+
 describe('openlibraryGetEdition', () => {
   beforeEach(() => {
     initOpenLibraryService();
@@ -48,7 +51,11 @@ describe('openlibraryGetEdition', () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
     const spy = vi
       .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
-      .mockResolvedValueOnce({ editions: [FULL_EDITION, SECOND_EDITION], unresolved: [] });
+      .mockResolvedValueOnce({
+        editions: [FULL_EDITION, SECOND_EDITION],
+        unresolved: [],
+        authorGaps: NO_GAPS,
+      });
 
     const input = openlibraryGetEdition.input.parse({
       identifiers: ['9780743273565', '9782952690607'],
@@ -66,6 +73,7 @@ describe('openlibraryGetEdition', () => {
     vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
       editions: [FULL_EDITION],
       unresolved: ['OL99999999M'],
+      authorGaps: NO_GAPS,
     });
 
     const input = openlibraryGetEdition.input.parse({
@@ -85,7 +93,7 @@ describe('openlibraryGetEdition', () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
     const spy = vi
       .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
-      .mockResolvedValueOnce({ editions: [FULL_EDITION], unresolved: [] });
+      .mockResolvedValueOnce({ editions: [FULL_EDITION], unresolved: [], authorGaps: NO_GAPS });
 
     const input = openlibraryGetEdition.input.parse({
       identifiers: ['9780743273565', 'notanisbn'],
@@ -101,6 +109,7 @@ describe('openlibraryGetEdition', () => {
     vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
       editions: [],
       unresolved: ['OL99999998M', 'OL99999999M'],
+      authorGaps: NO_GAPS,
     });
 
     const input = openlibraryGetEdition.input.parse({
@@ -141,6 +150,7 @@ describe('openlibraryGetEdition', () => {
     vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
       editions: [],
       unresolved: ['OL99999999M'],
+      authorGaps: NO_GAPS,
     });
 
     const input = openlibraryGetEdition.input.parse({
@@ -156,6 +166,65 @@ describe('openlibraryGetEdition', () => {
     });
   });
 
+  // ─── Author enrichment notice ──────────────────────────────────────────────
+
+  it('names the failed and the skipped editions in one notice, keeping the editions', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [FULL_EDITION, SECOND_EDITION],
+      unresolved: [],
+      authorGaps: { failed: ['OL7353617M'], skipped: ['OL22855101M', 'OL1M'] },
+    });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['OL7353617M', 'OL22855101M', 'OL1M'],
+      id_type: 'olid',
+    });
+    const result = await openlibraryGetEdition.handler(input, ctx);
+
+    expect(result.editions).toHaveLength(2);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('failed for 1 edition (OL7353617M)');
+    expect(notice).toContain('skipped for 2 editions (OL22855101M, OL1M)');
+    expect(notice).toContain('author ID');
+  });
+
+  it('names only the failure when nothing was skipped', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [FULL_EDITION],
+      unresolved: [],
+      authorGaps: { failed: ['OL7353617M'], skipped: [] },
+    });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['OL7353617M'],
+      id_type: 'olid',
+    });
+    await openlibraryGetEdition.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('failed for 1 edition (OL7353617M)');
+    expect(notice).not.toContain('skipped');
+  });
+
+  it('adds no notice when enrichment completed', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [FULL_EDITION],
+      unresolved: [],
+      authorGaps: NO_GAPS,
+    });
+
+    const input = openlibraryGetEdition.input.parse({
+      identifiers: ['OL7353617M'],
+      id_type: 'olid',
+    });
+    await openlibraryGetEdition.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).not.toHaveProperty('notice');
+  });
+
   // ─── Batch size ─────────────────────────────────────────────────────────────
 
   it('accepts a batch at the cap', async () => {
@@ -166,6 +235,7 @@ describe('openlibraryGetEdition', () => {
       .mockResolvedValueOnce({
         editions: identifiers.map((id) => ({ ...FULL_EDITION, edition_id: id })),
         unresolved: [],
+        authorGaps: NO_GAPS,
       });
 
     const input = openlibraryGetEdition.input.parse({ identifiers, id_type: 'olid' });

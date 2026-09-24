@@ -3,7 +3,8 @@
  * @module tests/tools/openlibrary-search-inside.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibrarySearchInside } from '@/mcp-server/tools/definitions/openlibrary-search-inside.tool.js';
 import {
@@ -58,6 +59,8 @@ const RICH_MATCH = {
 describe('openlibrarySearchInside', () => {
   beforeEach(() => {
     initOpenLibraryService();
+    // The suite never reaches openlibrary.org: a request no test routed fails loudly.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
   });
 
   afterEach(() => {
@@ -80,7 +83,7 @@ describe('openlibrarySearchInside', () => {
       ),
     );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibrarySearchInside.errors });
     const input = openlibrarySearchInside.input.parse({ query: '"the spice must flow"' });
     const result = await openlibrarySearchInside.handler(input, ctx);
 
@@ -109,7 +112,7 @@ describe('openlibrarySearchInside', () => {
 
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: 'matched phrase' }),
-      createMockContext(),
+      createMockContext({ errors: openlibrarySearchInside.errors }),
     );
 
     expect(result.matches[0]?.snippets).toEqual([
@@ -127,7 +130,7 @@ describe('openlibrarySearchInside', () => {
 
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: 'passage' }),
-      createMockContext(),
+      createMockContext({ errors: openlibrarySearchInside.errors }),
     );
 
     expect(result.matches).toHaveLength(1);
@@ -143,7 +146,7 @@ describe('openlibrarySearchInside', () => {
 
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: 'text' }),
-      createMockContext(),
+      createMockContext({ errors: openlibrarySearchInside.errors }),
     );
 
     expect(result.matches.map((m) => m.ia_identifier)).toEqual(['good']);
@@ -152,7 +155,7 @@ describe('openlibrarySearchInside', () => {
   it('treats a zero-match query as an empty result with a broadening notice', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(insideResponse([], 0));
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibrarySearchInside.errors });
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: '"zzqqxx nonsense phrase"' }),
       ctx,
@@ -167,7 +170,7 @@ describe('openlibrarySearchInside', () => {
 
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: 'dune', offset: 5000 }),
-      createMockContext(),
+      createMockContext({ errors: openlibrarySearchInside.errors }),
     );
 
     expect(result.total).toBe(52);
@@ -177,7 +180,12 @@ describe('openlibrarySearchInside', () => {
   it('sends the query, limit, and offset upstream', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(insideResponse([]));
 
-    await getOpenLibraryService().searchInside('dune', 5, 10, createMockContext());
+    await getOpenLibraryService().searchInside(
+      'dune',
+      5,
+      10,
+      createMockContext({ errors: openlibrarySearchInside.errors }),
+    );
 
     const url = String(fetchSpy.mock.calls[0]?.[0]);
     expect(url).toContain('/search/inside.json');
@@ -204,7 +212,7 @@ describe('openlibrarySearchInside', () => {
       insideResponse([{ identifier: 'item1', meta_title: 'A Book', text: manySnippets }]),
     );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibrarySearchInside.errors });
     const result = await openlibrarySearchInside.handler(
       openlibrarySearchInside.input.parse({ query: 'x' }),
       ctx,
@@ -224,7 +232,7 @@ describe('openlibrarySearchInside', () => {
       ]),
     );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibrarySearchInside.errors });
     const notices: string[] = [];
     ctx.enrich.notice = (message: string) => {
       notices.push(message);
@@ -241,7 +249,7 @@ describe('openlibrarySearchInside', () => {
       insideResponse([{ identifier: 'item1', meta_title: 'A Book', text: ['only one'] }]),
     );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibrarySearchInside.errors });
     const notices: string[] = [];
     ctx.enrich.notice = (message: string) => {
       notices.push(message);
@@ -291,5 +299,98 @@ describe('openlibrarySearchInside', () => {
       openlibrarySearchInside.format!({ total: 0, offset: 0, matches: [] })[0] as { text: string }
     ).text;
     expect(text).toContain('**Returned:** 0');
+  });
+});
+
+/**
+ * `hits.total` is the only zero-match signal the full-text index sends. A 200
+ * without a `hits` result set — an error object, `{}`, a truncated payload — is
+ * the upstream failing to answer, and reporting it as "no book contains this"
+ * would send the caller off to rephrase a query that was fine.
+ */
+describe('openlibrarySearchInside — a 200 without a result set', () => {
+  const upstreamUnavailableHint = () =>
+    openlibrarySearchInside.errors!.find((e) => e.reason === 'upstream_unavailable')?.recovery;
+
+  function contentText(result: { content: unknown[] }): string {
+    return result.content
+      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+      .join('\n');
+  }
+
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    initOpenLibraryService();
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns an empty result with the no-match notice for a real hits.total of 0', async () => {
+    fetchSpy.mockResolvedValue(insideResponse([], 0));
+
+    const result = await runToolContract(openlibrarySearchInside, {
+      query: '"zzqqxx nonsense phrase"',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ total: 0, offset: 0, matches: [] });
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toContain('No scanned book contains "zzqqxx nonsense phrase"');
+    expect(contentText(result)).toContain(notice as string);
+  });
+
+  it.each([
+    ['a null body', null],
+    ['an empty object', {}],
+    ['an error object', { error: 'search inside is temporarily unavailable' }],
+    ['a null hits', { hits: null }],
+    ['a string hits', { hits: 'unavailable' }],
+    ['an array hits', { hits: [] }],
+    ['a hits object with no total', { hits: { hits: [] } }],
+    ['a hits object with a non-numeric total', { hits: { total: 'many', hits: [] } }],
+  ])(
+    'fails %s as upstream_unavailable on both surfaces, with no no-match notice',
+    async (_label, body) => {
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+      const result = await runToolContract(openlibrarySearchInside, {
+        query: '"the spice must flow"',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'upstream_unavailable',
+            retryable: true,
+            recovery: { hint: upstreamUnavailableHint() },
+          },
+        },
+      });
+      const text = contentText(result);
+      expect(text).toContain(upstreamUnavailableHint());
+      expect(text).not.toContain('No scanned book contains');
+      // A fault on the most expensive endpoint is not re-issued in-loop.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('raises the fault from the service as a retryable ServiceUnavailable', async () => {
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const error = await getOpenLibraryService()
+      .searchInside('dune', 10, 0, createMockContext({ errors: openlibrarySearchInside.errors }))
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
+    });
   });
 });

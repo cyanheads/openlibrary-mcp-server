@@ -17,7 +17,11 @@ export const openlibraryAuthorResource = resource('openlibrary://authors/{author
     author_id: z.string().describe('Open Library Author ID (e.g., OL24638A).'),
   }),
   output: z.object({
-    author_id: z.string().describe('Open Library Author ID.'),
+    author_id: z
+      .string()
+      .describe(
+        'Canonical Open Library Author ID — differs from the requested author_id when that ID was merged into this author.',
+      ),
     name: z.string().describe('Primary author name.'),
     personal_name: z.string().optional().describe('Personal or given name.'),
     fuller_name: z.string().optional().describe('Full name including middle names.'),

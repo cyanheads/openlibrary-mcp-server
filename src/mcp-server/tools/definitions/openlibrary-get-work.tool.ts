@@ -6,7 +6,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { WORK_ID_MESSAGE, WORK_ID_PATTERN } from '@/mcp-server/tools/work-id.js';
+import {
+  getOpenLibraryService,
+  normalizeWorkId,
+} from '@/services/open-library/open-library-service.js';
 
 /**
  * Max subject tags rendered in the `content[]` text. `structuredContent` always
@@ -18,17 +22,22 @@ const SUBJECTS_TEXT_CAP = 10;
 export const openlibraryGetWork = tool('openlibrary_get_work', {
   title: 'Get Work',
   description:
-    'Fetch a work by Open Library Work ID (OL…W). Returns title, description, subjects, cover IDs, and linked author IDs for follow-up lookups. Works represent the abstract book concept independent of any specific edition. Note: author names are not included — use openlibrary_get_author or openlibrary_search_books for names.',
+    'Fetch a work by Open Library Work ID (OL…W). Returns title, description, subjects, cover IDs, and linked author IDs for follow-up lookups. Works represent the abstract book concept independent of any specific edition. A merged work ID resolves to the work it was merged into. To reach a work from an ISBN, call openlibrary_get_edition with id_type "isbn" — its work_id output is the parent work. Note: author names are not included — use openlibrary_get_author or openlibrary_search_books for names.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     work_id: z
       .string()
+      .regex(WORK_ID_PATTERN, WORK_ID_MESSAGE)
       .describe(
-        'Open Library Work ID. Format: OL…W (e.g., "OL45804W"). A leading "/works/" prefix is stripped if provided.',
+        'Open Library Work ID. Format: OL…W (e.g., "OL45804W"), optionally prefixed "/works/". Not an ISBN — resolve an ISBN to its work with openlibrary_get_edition (id_type "isbn").',
       ),
   }),
   output: z.object({
-    work_id: z.string().describe('Canonical Open Library Work ID (OL…W).'),
+    work_id: z
+      .string()
+      .describe(
+        'Canonical Open Library Work ID (OL…W) — differs from the requested work_id when that ID was merged into this work.',
+      ),
     title: z.string().describe('Work title.'),
     description: z
       .string()
@@ -57,19 +66,19 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Work ID does not exist on Open Library.',
+      when: 'Work ID does not exist on Open Library, or it redirects to no reachable work.',
       recovery:
-        'Verify the OLID format (e.g., "OL45804W") or use openlibrary_search_books to find the correct ID.',
+        'Verify the Work ID (e.g., "OL45804W") or find it with openlibrary_search_books; holding an ISBN, call openlibrary_get_edition with id_type "isbn", whose work_id output is the parent work.',
     },
   ],
 
-  /** Agent-facing context: discloses when the text output caps a long subject list. */
+  /** Agent-facing context: merged-ID substitution and subject-cap disclosures. */
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Disclosure when the text output caps a long list — names the omitted count and points to the complete array in structuredContent. Absent when nothing was capped.',
+        'Set when the requested work ID was merged into a different canonical ID, and when the text output caps a long subject list (naming the omitted count and the complete array in structuredContent). Absent when neither applies.',
       ),
   },
 
@@ -85,12 +94,21 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
       );
     }
 
+    // `notice` is last-wins, so both disclosures are joined into one string.
+    const notices: string[] = [];
+    const requested = normalizeWorkId(input.work_id);
+    if (result.work_id !== requested) {
+      notices.push(
+        `${requested} is a merged record; this is ${result.work_id}. Use ${result.work_id} for further lookups.`,
+      );
+    }
     // Disclose the subjects that format() caps out of the text; structuredContent keeps all.
     if (result.subjects.length > SUBJECTS_TEXT_CAP) {
-      ctx.enrich.notice(
+      notices.push(
         `Subjects are capped at ${SUBJECTS_TEXT_CAP} in text output; showing ${SUBJECTS_TEXT_CAP} of ${result.subjects.length}. The full list is in structuredContent (subjects).`,
       );
     }
+    if (notices.length) ctx.enrich.notice(notices.join(' '));
 
     return result;
   },

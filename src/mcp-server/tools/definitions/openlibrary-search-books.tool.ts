@@ -25,6 +25,17 @@ const IA_TEXT_CAP = 5;
  */
 const SUBJECTS_TEXT_CAP = 5;
 
+/** Text label for each availability flag, in the order `format()` renders them. */
+const AVAILABILITY_FLAG_LABELS = [
+  ['available_to_browse', 'Browse'],
+  ['available_to_borrow', 'Borrow'],
+  ['available_to_waitlist', 'Waitlist'],
+  ['is_readable', 'Read'],
+  ['is_lendable', 'Lend'],
+  ['is_previewable', 'Preview'],
+  ['is_restricted', 'Restricted'],
+] as const;
+
 export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   title: 'Search Books',
   description:
@@ -132,25 +143,54 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
               .describe('Average community rating (1–5). Absent when no ratings exist.'),
             availability: z
               .object({
-                status: z.string().describe('Availability status string from Internet Archive.'),
+                status: z
+                  .string()
+                  .describe(
+                    'Availability status from Internet Archive, e.g. "open" (freely readable), "borrow_available", "borrow_unavailable", "private", or "error" (the lending lookup failed, so no flags accompany it). "unknown" when Open Library sent no status.',
+                  ),
                 available_to_browse: z
                   .boolean()
-                  .describe('True when the book can be browsed for free.'),
-                available_to_borrow: z.boolean().describe('True when the book can be borrowed.'),
-                available_to_waitlist: z.boolean().describe('True when a waitlist is available.'),
-                is_readable: z.boolean().describe('True when the book is freely readable online.'),
-                is_lendable: z.boolean().describe('True when the book can be lent.'),
-                is_previewable: z.boolean().describe('True when a limited preview is available.'),
-                is_restricted: z.boolean().describe('True when access is restricted.'),
+                  .optional()
+                  .describe(
+                    'True when the book can be browsed for free. Absent when not reported.',
+                  ),
+                available_to_borrow: z
+                  .boolean()
+                  .optional()
+                  .describe('True when the book can be borrowed. Absent when not reported.'),
+                available_to_waitlist: z
+                  .boolean()
+                  .optional()
+                  .describe('True when a waitlist is available. Absent when not reported.'),
+                is_readable: z
+                  .boolean()
+                  .optional()
+                  .describe(
+                    'True when the book is freely readable online. Absent when not reported.',
+                  ),
+                is_lendable: z
+                  .boolean()
+                  .optional()
+                  .describe('True when the book can be lent. Absent when not reported.'),
+                is_previewable: z
+                  .boolean()
+                  .optional()
+                  .describe('True when a limited preview is available. Absent when not reported.'),
+                is_restricted: z
+                  .boolean()
+                  .optional()
+                  .describe('True when access is restricted. Absent when not reported.'),
                 openlibrary_edition: z
                   .string()
                   .optional()
-                  .describe('Edition OLID the availability check was resolved against.'),
+                  .describe(
+                    'Edition OLID the availability check was resolved against. Absent when not reported.',
+                  ),
               })
               .nullable()
               .optional()
               .describe(
-                'Live reading availability from Internet Archive. Present when include_availability is true and the work has an Internet Archive item. Null when include_availability is true but no IA item exists.',
+                'Live reading availability from Internet Archive, present when include_availability is true. Open Library leaves flags out for some works — an absent flag is unknown, not false. Null means no availability was returned for the work: always so without an Internet Archive item, and sometimes so for a work that has one.',
               ),
             ia_identifiers: z
               .array(z.string())
@@ -298,22 +338,16 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
         lines.push(`**IA:** ${work.ia_identifiers.slice(0, IA_TEXT_CAP).join(', ')}`);
       }
       if (work.availability != null) {
-        const avParts = [
-          `Status: ${work.availability.status}`,
-          `Browse: ${work.availability.available_to_browse}`,
-          `Borrow: ${work.availability.available_to_borrow}`,
-          `Waitlist: ${work.availability.available_to_waitlist}`,
-          `Read: ${work.availability.is_readable}`,
-          `Lend: ${work.availability.is_lendable}`,
-          `Preview: ${work.availability.is_previewable}`,
-          `Restricted: ${work.availability.is_restricted}`,
-        ];
-        if (work.availability.openlibrary_edition) {
-          avParts.push(`Edition: ${work.availability.openlibrary_edition}`);
+        const av = work.availability;
+        const avParts = [`Status: ${av.status}`];
+        for (const [flag, label] of AVAILABILITY_FLAG_LABELS) {
+          // An absent flag is unknown, so it is left out rather than rendered as false.
+          if (av[flag] !== undefined) avParts.push(`${label}: ${av[flag]}`);
         }
+        if (av.openlibrary_edition) avParts.push(`Edition: ${av.openlibrary_edition}`);
         lines.push(`**Availability:** ${avParts.join(' | ')}`);
       } else if (work.availability === null) {
-        lines.push('**Availability:** No Internet Archive item found.');
+        lines.push('**Availability:** No availability returned by Open Library.');
       }
     }
 

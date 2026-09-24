@@ -3,11 +3,31 @@
  * @module tests/tools/openlibrary-get-work-edge.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+
+/**
+ * `work_id` values that are not work OLIDs. Open Library answers each with a
+ * 404, or — for `OL…M` and `OL…A` — with a 301 to the edition or author record.
+ */
+const NON_WORK_IDS = [
+  ['an ISBN-13', '9780765326355'],
+  ['a hyphenated ISBN-13', '978-0-7653-2635-5'],
+  ['an ISBN-10', '0140328726'],
+  ['an ISBN-10 with an X check digit', '080442957X'],
+  ['an edition OLID', 'OL7353617M'],
+  ['an author OLID', 'OL34184A'],
+  ['a lowercase work OLID', 'ol45804w'],
+  ['a whitespace-padded work OLID', ' OL45804W '],
+  ['a slugged work path', 'OL45804W/Fantastic_Mr_Fox'],
+  ['a full work URL', 'https://openlibrary.org/works/OL45804W'],
+  ['a prefix without its leading slash', 'works/OL45804W'],
+  ['an empty string', ''],
+] as const;
 
 const SPARSE_WORK = {
   work_id: 'OL1W',
@@ -168,7 +188,7 @@ describe('openlibraryGetWork — edge cases and security', () => {
     const subjects = Array.from({ length: 12 }, (_, i) => `subject-${String(i).padStart(2, '0')}`);
     vi.spyOn(svc, 'getWork').mockResolvedValueOnce({ ...SPARSE_WORK, subjects });
 
-    const input = openlibraryGetWork.input.parse({ work_id: 'OL27482W' });
+    const input = openlibraryGetWork.input.parse({ work_id: SPARSE_WORK.work_id });
     const result = await openlibraryGetWork.handler(input, ctx);
 
     // structuredContent keeps every subject.
@@ -195,12 +215,100 @@ describe('openlibraryGetWork — edge cases and security', () => {
     const subjects = Array.from({ length: 10 }, (_, i) => `subject-${String(i).padStart(2, '0')}`);
     vi.spyOn(svc, 'getWork').mockResolvedValueOnce({ ...SPARSE_WORK, subjects });
 
-    const input = openlibraryGetWork.input.parse({ work_id: 'OL27482W' });
+    const input = openlibraryGetWork.input.parse({ work_id: SPARSE_WORK.work_id });
     const result = await openlibraryGetWork.handler(input, ctx);
 
     // At exactly the cap nothing is omitted — no disclosure, all 10 render in text.
     expect(getEnrichment(ctx).notice).toBeUndefined();
     const text = (openlibraryGetWork.format!(result)[0] as { text: string }).text;
     expect(text).toContain('subject-09');
+  });
+});
+
+describe('openlibraryGetWork — work_id shape', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    initOpenLibraryService();
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('advertises the work OLID pattern in the input JSON Schema', () => {
+    const schema = z.toJSONSchema(openlibraryGetWork.input) as unknown as {
+      properties: { work_id: { pattern?: string } };
+    };
+    expect(schema.properties.work_id.pattern).toBe('^(?:\\/works\\/)?OL\\d+W$');
+  });
+
+  it.each(NON_WORK_IDS)(
+    'rejects %s at validation, naming openlibrary_get_edition, with no upstream request',
+    async (_label, workId) => {
+      const result = await runToolContract(openlibraryGetWork, { work_id: workId });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_arguments',
+            recovery: { hint: expect.stringContaining('openlibrary_get_edition') },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('openlibrary_get_edition');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['a bare work OLID', 'OL45804W'],
+    ['a /works/-prefixed work OLID', '/works/OL45804W'],
+  ])('accepts %s and resolves it upstream', async (_label, workId) => {
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            key: '/works/OL45804W',
+            type: { key: '/type/work' },
+            title: 'Fantastic Mr Fox',
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: workId });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ work_id: 'OL45804W' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still reports a well-formed but absent work as not_found', async () => {
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 404, statusText: 'Not Found' })),
+    );
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL999999999999W' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } },
+    });
+  });
+
+  it('names openlibrary_get_edition as the ISBN route in the description, work_id, and not_found recovery', () => {
+    const recovery = openlibraryGetWork.errors!.find((e) => e.reason === 'not_found')!.recovery;
+    const workIdDescription = openlibraryGetWork.input.shape.work_id.description;
+    for (const text of [openlibraryGetWork.description, workIdDescription, recovery]) {
+      expect(text).toContain('openlibrary_get_edition');
+      expect(text).toContain('isbn');
+    }
+    expect(recovery).toContain('openlibrary_search_books');
   });
 });

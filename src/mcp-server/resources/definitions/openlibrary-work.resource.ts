@@ -17,7 +17,11 @@ export const openlibraryWorkResource = resource('openlibrary://works/{work_id}',
     work_id: z.string().describe('Open Library Work ID (e.g., OL45804W).'),
   }),
   output: z.object({
-    work_id: z.string().describe('Open Library Work ID.'),
+    work_id: z
+      .string()
+      .describe(
+        'Canonical Open Library Work ID — differs from the requested work_id when that ID was merged into this work.',
+      ),
     title: z.string().describe('Work title.'),
     description: z.string().optional().describe('Work description. Absent when not provided.'),
     subjects: z.array(z.string()).describe('Subject tags.'),

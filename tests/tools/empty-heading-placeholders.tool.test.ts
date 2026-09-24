@@ -59,6 +59,7 @@ describe('openlibraryGetWork format — empty title', () => {
 describe('openlibraryGetAuthorWorks format — empty title', () => {
   const result = {
     total: 1,
+    offset: 0,
     author_id: 'OL19981A',
     works: [{ work_id: 'OL45822402W', title: '', cover_ids: [] }],
   };
@@ -119,6 +120,7 @@ describe('openlibraryGetEdition format — empty title', () => {
 describe('openlibraryGetEditions format — empty title', () => {
   const result = {
     total: 1,
+    offset: 0,
     work_id: 'OL45804W',
     editions: [
       {
@@ -157,6 +159,7 @@ describe('openlibraryGetSubject format — empty title', () => {
     subject_name: 'Fiction',
     subject_key: 'fiction',
     work_count: 1,
+    offset: 0,
     works: [{ work_id: 'OL45822402W', title: '', author_names: [], edition_count: 0 }],
   };
 

@@ -27,6 +27,11 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   }),
   output: z.object({
     total: z.number().describe('Total works by this author.'),
+    offset: z
+      .number()
+      .describe(
+        'Zero-based offset of the first returned result — echoes the requested offset, so an empty page still records the offset that produced it.',
+      ),
     author_id: z.string().describe('Open Library Author ID.'),
     works: z
       .array(
@@ -61,7 +66,7 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Author ID does not exist on Open Library.',
+      when: 'Author ID does not exist on Open Library, names a record that is not an author (a work or edition OLID), or redirects to no reachable author.',
       recovery:
         'Verify the OLID format (e.g., "OL24638A") or use openlibrary_search_authors to find the correct ID.',
     },
@@ -90,13 +95,14 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
         `${requested} is a merged record; these are the works of ${result.author_id}. Use ${result.author_id} for further lookups.`,
       );
     }
-    return result;
+    // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
+    return { ...result, offset: input.offset };
   },
 
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `**Author ID:** ${result.author_id} | **Total works:** ${result.total} | **Returned:** ${result.works.length}`,
+      `**Author ID:** ${result.author_id} | **Total works:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.works.length}`,
     );
 
     for (const work of result.works) {

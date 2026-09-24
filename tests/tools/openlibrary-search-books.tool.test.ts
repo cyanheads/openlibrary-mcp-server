@@ -142,16 +142,50 @@ describe('openlibrarySearchBooks', () => {
     const output = { total: 1, offset: 0, works: [work] };
     const text = (openlibrarySearchBooks.format!(output)[0] as { text: string }).text;
 
-    expect(text).toContain('borrow_available');
-    expect(text).toContain('OL61057835M');
+    expect(text).toContain(
+      '**Availability:** Status: borrow_available | Browse: true | Borrow: true | Waitlist: false | Read: false | Lend: true | Preview: true | Restricted: false | Edition: OL61057835M',
+    );
   });
 
-  it('formats null availability as no IA item message', () => {
+  it('renders only the availability flags Open Library returned', () => {
+    const work = makeWork({
+      availability: { status: 'open', is_previewable: true, is_restricted: false },
+    });
+    const text = (
+      openlibrarySearchBooks.format!({ total: 1, offset: 0, works: [work] })[0] as { text: string }
+    ).text;
+
+    expect(text).toContain('**Availability:** Status: open | Preview: true | Restricted: false');
+    // An omitted flag is unknown, not false — it must not be rendered either way.
+    expect(text).not.toMatch(/Read: |Borrow: |undefined/);
+  });
+
+  it('renders a status "error" object as its status alone', () => {
+    const work = makeWork({ availability: { status: 'error' } });
+    const text = (
+      openlibrarySearchBooks.format!({ total: 1, offset: 0, works: [work] })[0] as { text: string }
+    ).text;
+
+    expect(text).toContain('**Availability:** Status: error');
+    expect(text).not.toContain('Status: error |');
+  });
+
+  // A work with IA items can still come back without availability, so null says
+  // nothing about whether an Internet Archive item exists.
+  it('renders null availability as none returned, not as a missing IA item', () => {
     const work = makeWork({ availability: null });
     const output = { total: 1, offset: 0, works: [work] };
     const text = (openlibrarySearchBooks.format!(output)[0] as { text: string }).text;
 
-    expect(text).toContain('No Internet Archive item found');
+    expect(text).toContain('**Availability:** No availability returned by Open Library.');
+    expect(text).not.toContain('No Internet Archive item found');
+  });
+
+  it('describes null availability as none returned rather than as no IA item', () => {
+    const description = openlibrarySearchBooks.output.shape.works.element.shape.availability
+      .description as string;
+    expect(description).toContain('no availability');
+    expect(description).not.toContain('no IA item exists');
   });
 
   it('handles sparse work (no optional fields)', () => {

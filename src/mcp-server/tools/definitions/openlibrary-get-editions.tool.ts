@@ -6,17 +6,24 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { WORK_ID_MESSAGE, WORK_ID_PATTERN } from '@/mcp-server/tools/work-id.js';
+import {
+  getOpenLibraryService,
+  normalizeWorkId,
+} from '@/services/open-library/open-library-service.js';
 
 export const openlibraryGetEditions = tool('openlibrary_get_editions', {
   title: 'Get Editions',
   description:
-    'List editions of a work — different publishers, languages, formats, and print runs. Returns ISBNs, publisher, language, page count, and edition OLIDs. Use after openlibrary_get_work or openlibrary_search_books to find a specific printing.',
+    'List editions of a work — different publishers, languages, formats, and print runs. Returns ISBNs, publisher, language, page count, and edition OLIDs. Use after openlibrary_get_work or openlibrary_search_books to find a specific printing. A merged work ID resolves to the work it was merged into. To reach a work from an ISBN, call openlibrary_get_edition with id_type "isbn" — its work_id output is the parent work.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     work_id: z
       .string()
-      .describe('Open Library Work ID (OL…W). A leading "/works/" prefix is stripped if provided.'),
+      .regex(WORK_ID_PATTERN, WORK_ID_MESSAGE)
+      .describe(
+        'Open Library Work ID. Format: OL…W (e.g., "OL45804W"), optionally prefixed "/works/". Not an ISBN — resolve an ISBN to its work with openlibrary_get_edition (id_type "isbn").',
+      ),
     limit: z
       .number()
       .int()
@@ -28,7 +35,16 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
   }),
   output: z.object({
     total: z.number().describe('Total editions for this work.'),
-    work_id: z.string().describe('Open Library Work ID.'),
+    offset: z
+      .number()
+      .describe(
+        'Zero-based offset of the first returned result — echoes the requested offset, so an empty page still records the offset that produced it.',
+      ),
+    work_id: z
+      .string()
+      .describe(
+        'Canonical Open Library Work ID the editions were found under — differs from the requested work_id when that ID was merged into this work.',
+      ),
     editions: z
       .array(
         z
@@ -60,7 +76,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
             work_id: z
               .string()
               .optional()
-              .describe('Parent Work ID. Usually matches the requested work_id.'),
+              .describe('Parent Work ID. Usually matches the top-level work_id.'),
           })
           .describe('A single edition of the work.'),
       )
@@ -68,14 +84,18 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
   }),
   enrichment: {
     totalCount: z.number().optional().describe('Total editions for this work across all pages.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Set when the requested work ID was merged into a different canonical ID.'),
   },
   errors: [
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Work ID does not exist on Open Library.',
+      when: 'Work ID does not exist on Open Library, or it redirects to no reachable work.',
       recovery:
-        'Verify the Work ID format (e.g., "OL45804W") or use openlibrary_search_books first.',
+        'Verify the Work ID (e.g., "OL45804W") or find it with openlibrary_search_books; holding an ISBN, call openlibrary_get_edition with id_type "isbn", whose work_id output is the parent work.',
     },
   ],
 
@@ -95,13 +115,22 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       );
     }
     ctx.enrich.total(result.total);
-    return result;
+    // format() never sees the request, so a merged-ID substitution is disclosed
+    // here, and only when the IDs differ.
+    const requested = normalizeWorkId(input.work_id);
+    if (result.work_id !== requested) {
+      ctx.enrich.notice(
+        `${requested} is a merged record; these are the editions of ${result.work_id}. Use ${result.work_id} for further lookups.`,
+      );
+    }
+    // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
+    return { ...result, offset: input.offset };
   },
 
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `**Work ID:** ${result.work_id} | **Total editions:** ${result.total} | **Returned:** ${result.editions.length}`,
+      `**Work ID:** ${result.work_id} | **Total editions:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.editions.length}`,
     );
 
     for (const ed of result.editions) {

@@ -90,7 +90,7 @@ describe('openlibraryGetEditions', () => {
   });
 
   it('formats editions with all key fields', () => {
-    const blocks = openlibraryGetEditions.format!(MOCK_EDITIONS_RESULT);
+    const blocks = openlibraryGetEditions.format!({ ...MOCK_EDITIONS_RESULT, offset: 0 });
     const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('OL45804W');
@@ -119,7 +119,8 @@ describe('openlibraryGetEditions', () => {
         },
       ],
     };
-    const text = (openlibraryGetEditions.format!(sparse)[0] as { text: string }).text;
+    const text = (openlibraryGetEditions.format!({ ...sparse, offset: 0 })[0] as { text: string })
+      .text;
     expect(text).toContain('OL1M');
     expect(text).toContain('Sparse Edition');
   });

@@ -62,7 +62,7 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Author ID does not exist on Open Library.',
+      when: 'Author ID does not exist on Open Library, names a record that is not an author (a work or edition OLID), or redirects to no reachable author.',
       recovery:
         'Verify the OLID format (e.g., "OL24638A") or use openlibrary_search_authors to find the correct ID.',
     },

@@ -6,13 +6,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
-import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
-import type { EditionIdType } from '@/services/open-library/types.js';
+import { getOpenLibraryService, isIsbn } from '@/services/open-library/open-library-service.js';
+import type { AuthorLookupGaps, EditionIdType } from '@/services/open-library/types.js';
 
 /**
  * Max identifiers per call. Open Library resolves the whole batch in one
- * `/api/books` request; 50 keys measure ~2s and ~60KB of detail records, which
- * is where one response stops being worth the round trips it saves.
+ * `/api/books.json` request; 50 keys measure ~3s and ~130KB of detail records,
+ * which is where one response stops being worth the round trips it saves.
  */
 const MAX_IDENTIFIERS = 50;
 
@@ -23,10 +23,9 @@ const MAX_IDENTIFIERS = 50;
  */
 function identifierExpectation(identifier: string, idType: EditionIdType): string | undefined {
   if (idType === 'isbn') {
-    const digits = identifier.replace(/-/g, '');
-    return /^\d{10}$/.test(digits) || /^\d{13}$/.test(digits)
+    return isIsbn(identifier)
       ? undefined
-      : 'an ISBN of 10 or 13 digits';
+      : 'an ISBN of 10 or 13 digits, where an ISBN-10 may end in an X check digit';
   }
   if (idType === 'olid') {
     return /^OL\d+M$/i.test(identifier)
@@ -39,9 +38,35 @@ function identifierExpectation(identifier: string, idType: EditionIdType): strin
   return;
 }
 
+/** Joins edition IDs into a list, naming the count. */
+function editionList(ids: string[]): string {
+  return `${ids.length} edition${ids.length === 1 ? '' : 's'} (${ids.join(', ')})`;
+}
+
+/**
+ * The enrichment notice for a batch whose author lookups fell short, or
+ * `undefined` when every lookup completed.
+ */
+function authorGapNotice({ failed, skipped }: AuthorLookupGaps): string | undefined {
+  if (failed.length === 0 && skipped.length === 0) return;
+  const parts: string[] = [];
+  if (failed.length) {
+    parts.push(`Author lookups against Open Library failed for ${editionList(failed)}.`);
+  }
+  if (skipped.length) {
+    parts.push(
+      `Author lookups were skipped for ${editionList(skipped)} once a lookup had failed or the call's time budget ran out, rather than wait on a struggling upstream.`,
+    );
+  }
+  parts.push(
+    'Those editions list no authors, or show an author ID in place of the name; every other field is complete. Call again later with just those identifiers to fill in the authors.',
+  );
+  return parts.join(' ');
+}
+
 export const openlibraryGetEdition = tool('openlibrary_get_edition', {
   title: 'Get Edition',
-  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream request, so a bibliography or shelf export costs one call rather than one per book; a large batch is a large response, so ask for what you need. Returns full edition metadata including authors, publisher, language, all identifier types, and the parent work ID, with author names inline and no secondary lookup; when the edition record itself lists no authors, they are recovered from the parent work and marked as such. Partial success is the norm — identifiers that resolve come back in editions, the rest are listed in unresolved with a reason, and the call fails only when nothing resolved.`,
+  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream request, so a bibliography or shelf export costs one call rather than one per book; a large batch is a large response, so ask for what you need. Returns full edition metadata including authors, publisher, language, all identifier types, and the parent work ID, with author names inline and no secondary lookup; when the edition record itself lists no authors, they are recovered from the parent work and marked as such, and a notice names any edition whose recovery failed. Partial success is the norm — identifiers that resolve come back in editions, the rest are listed in unresolved with a reason, and the call fails only when nothing resolved.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     identifiers: z
@@ -49,7 +74,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         z
           .string()
           .describe(
-            'One identifier value. For ISBN: 10 or 13 digits, hyphens optional. For OCLC: numeric string. For LCCN: string as-is. For OLID: Open Library edition ID (e.g., OL7353617M).',
+            'One identifier value. For ISBN: 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For OCLC: numeric string. For LCCN: string as-is. For OLID: Open Library edition ID (e.g., OL7353617M).',
           ),
       )
       .min(1)
@@ -90,7 +115,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
                   .describe('An author contributor for this edition.'),
               )
               .describe(
-                'Authors credited for this edition. Empty only when neither the edition nor its parent work records an author.',
+                'Authors credited for this edition. Empty when neither the edition nor its parent work records an author, or when the lookup of the parent work failed or was skipped — the notice names those editions.',
               ),
             publish_date: z
               .string()
@@ -170,9 +195,29 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Every identifier in the batch is malformed for the specified id_type.',
       recovery:
-        'Check the identifier format: ISBNs are 10 or 13 digits; OCLC numbers are numeric; OLIDs end in M (e.g., OL7353617M).',
+        'Check the identifier format: ISBNs are 10 or 13 digits, and an ISBN-10 may end in an X check digit; OCLC numbers are numeric; OLIDs end in M (e.g., OL7353617M).',
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: "Open Library's batch edition lookup answered with an HTTP error status other than 429, or with an HTML page instead of JSON.",
+      recovery:
+        "Open Library's edition lookup is failing on its side, not rejecting these identifiers — wait a minute or two and retry the same call.",
+      retryable: true,
+      // The service classifies the bibkeys route's failure below the handler.
+      thrownBy: 'service',
     },
   ],
+
+  /** Agent-facing context: which editions came back with incomplete authors. */
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Present when author lookups for some editions failed or were skipped: names those editions, whose authors are missing or shown by author ID. Absent when every lookup completed.',
+      ),
+  },
 
   async handler(input, ctx) {
     ctx.log.info('Fetching editions', { count: input.identifiers.length, id_type: input.id_type });
@@ -192,7 +237,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
 
     const resolved = wellFormed.length
       ? await getOpenLibraryService().getEditionsByIdentifiers(wellFormed, input.id_type, ctx)
-      : { editions: [], unresolved: [] };
+      : { editions: [], unresolved: [], authorGaps: { failed: [], skipped: [] } };
     for (const identifier of resolved.unresolved) {
       unresolved.push({ identifier, reason: 'not_found' });
     }
@@ -210,6 +255,9 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         ctx.recoveryFor(reason),
       );
     }
+
+    const notice = authorGapNotice(resolved.authorGaps);
+    if (notice) ctx.enrich.notice(notice);
 
     return { editions: resolved.editions, unresolved };
   },

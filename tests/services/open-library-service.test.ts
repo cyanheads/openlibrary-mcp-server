@@ -14,16 +14,22 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryAuthorResource } from '@/mcp-server/resources/definitions/openlibrary-author.resource.js';
+import { openlibraryWorkResource } from '@/mcp-server/resources/definitions/openlibrary-work.resource.js';
+import { openlibraryGetAuthor } from '@/mcp-server/tools/definitions/openlibrary-get-author.tool.js';
+import { openlibraryGetAuthorWorks } from '@/mcp-server/tools/definitions/openlibrary-get-author-works.tool.js';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
+import { openlibraryGetEditions } from '@/mcp-server/tools/definitions/openlibrary-get-editions.tool.js';
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
+import { openlibrarySearchBooks } from '@/mcp-server/tools/definitions/openlibrary-search-books.tool.js';
 import {
   EDITION_ENRICHMENT_CONCURRENCY,
   getOpenLibraryService,
   initOpenLibraryService,
   MAX_AUTHOR_REDIRECT_HOPS,
+  MAX_WORK_REDIRECT_HOPS,
 } from '@/services/open-library/open-library-service.js';
 
 /** A 404 like Open Library returns for a missing by-ID record (works/authors/editions). */
@@ -31,7 +37,7 @@ function notFoundResponse(): Response {
   return new Response('{}', { status: 404, statusText: 'Not Found' });
 }
 
-/** A 200 `{}` like the /api/books bibkeys endpoint returns for an unmatched OCLC. */
+/** A 200 `{}` like the /api/books.json bibkeys endpoint returns for an unmatched OCLC. */
 function emptyOkResponse(): Response {
   return new Response('{}', { status: 200, statusText: 'OK' });
 }
@@ -72,6 +78,11 @@ function searchResponse(doc: Record<string, unknown>): Response {
     { status: 200 },
   );
 }
+
+// The suite never reaches openlibrary.org: a request no test routed fails loudly.
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+});
 
 describe('OpenLibraryService — upstream 404 handling', () => {
   beforeEach(() => {
@@ -126,7 +137,11 @@ describe('OpenLibraryService — upstream 404 handling', () => {
 
     await expect(
       svc.getEditionsByIdentifiers(['99999999', '88888888'], 'oclc', ctx),
-    ).resolves.toEqual({ editions: [], unresolved: ['99999999', '88888888'] });
+    ).resolves.toEqual({
+      editions: [],
+      unresolved: ['99999999', '88888888'],
+      authorGaps: { failed: [], skipped: [] },
+    });
   });
 
   it('surfaces the batch not_found contract through the get_edition tool', async () => {
@@ -340,6 +355,250 @@ describe('OpenLibraryService — searchBooks subject mapping', () => {
   });
 });
 
+/**
+ * Availability objects as `/search.json?fields=…,availability` returns them. The
+ * partial shapes are verbatim from live searches (moby dick, calculus,
+ * cookbook, programming): Open Library nulls five of the booleans on some
+ * `open` works, drops six of them on a `status: "error"` lookup, and nulls
+ * `openlibrary_edition` alone on others.
+ */
+describe('OpenLibraryService — searchBooks availability mapping', () => {
+  const COMPLETE = {
+    status: 'borrow_available',
+    available_to_browse: true,
+    available_to_borrow: false,
+    available_to_waitlist: false,
+    is_printdisabled: true,
+    is_readable: false,
+    is_lendable: true,
+    is_previewable: true,
+    identifier: 'jrrtolkienshobbi0000unse',
+    openlibrary_work: 'OL16059606W',
+    openlibrary_edition: 'OL32589898M',
+    is_restricted: true,
+    __src__: 'core.models.lending.get_availability',
+  };
+
+  const NULL_BOOLEANS = {
+    status: 'open',
+    available_to_browse: null,
+    available_to_borrow: null,
+    available_to_waitlist: null,
+    is_printdisabled: null,
+    is_readable: null,
+    is_lendable: null,
+    is_previewable: true,
+    identifier: 'lp_moby-dick-or-the-whale-by-herman-melville_herman-melville-louis-zorich',
+    openlibrary_work: null,
+    openlibrary_edition: null,
+    is_restricted: false,
+    __src__: 'core.models.lending.get_availability',
+  };
+
+  const ERROR_STATUS = {
+    status: 'error',
+    error_message: 'not found',
+    identifier: 'calculusmadeeasy00thom_850',
+    is_restricted: true,
+    is_browseable: false,
+    __src__: 'core.models.lending.get_availability',
+  };
+
+  const EDITION_NULL_ONLY = {
+    status: 'borrow_available',
+    available_to_browse: true,
+    available_to_borrow: false,
+    available_to_waitlist: false,
+    is_readable: false,
+    is_lendable: true,
+    is_previewable: true,
+    identifier: 'bwb_P9-CDP-811',
+    openlibrary_edition: null,
+    is_restricted: true,
+  };
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function availabilityFor(availability: unknown) {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        searchResponse({
+          ia: ['someitem'],
+          ...(availability === undefined ? {} : { availability }),
+        }),
+      ),
+    );
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'moby dick', limit: 1, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+    return result.works[0]?.availability;
+  }
+
+  it('keeps every schema key of a complete object and drops the rest', async () => {
+    expect(await availabilityFor(COMPLETE)).toEqual({
+      status: 'borrow_available',
+      available_to_browse: true,
+      available_to_borrow: false,
+      available_to_waitlist: false,
+      is_readable: false,
+      is_lendable: true,
+      is_previewable: true,
+      is_restricted: true,
+      openlibrary_edition: 'OL32589898M',
+    });
+  });
+
+  // A `false` default would state the opposite of `status: "open"`.
+  it('omits the booleans Open Library nulled rather than defaulting them to false', async () => {
+    expect(await availabilityFor(NULL_BOOLEANS)).toEqual({
+      status: 'open',
+      is_previewable: true,
+      is_restricted: false,
+    });
+  });
+
+  // The IA lookup itself failed, so the flags that ride along are not facts.
+  it('keeps only the status of a status "error" object', async () => {
+    expect(await availabilityFor(ERROR_STATUS)).toEqual({ status: 'error' });
+  });
+
+  it('omits a null openlibrary_edition and keeps the booleans', async () => {
+    expect(await availabilityFor(EDITION_NULL_ONLY)).toEqual({
+      status: 'borrow_available',
+      available_to_browse: true,
+      available_to_borrow: false,
+      available_to_waitlist: false,
+      is_readable: false,
+      is_lendable: true,
+      is_previewable: true,
+      is_restricted: true,
+    });
+  });
+
+  it('reports "unknown" when the status is missing or not a string', async () => {
+    expect(await availabilityFor({ is_readable: true })).toEqual({
+      status: 'unknown',
+      is_readable: true,
+    });
+    expect(await availabilityFor({ status: 7, is_readable: 'yes' })).toEqual({
+      status: 'unknown',
+    });
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['a string', 'open'],
+    ['an array', [COMPLETE]],
+  ])('maps availability that is %s to null', async (_label, value) => {
+    expect(await availabilityFor(value)).toBeNull();
+  });
+
+  it('leaves availability out entirely when it was not requested', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(searchResponse({ availability: COMPLETE })),
+    );
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'moby dick', limit: 1, offset: 0 },
+      createMockContext(),
+    );
+    expect(result.works[0]?.availability).toBeUndefined();
+  });
+
+  it('returns the whole page through the tool when works carry every partial shape', async () => {
+    const shapes = [COMPLETE, NULL_BOOLEANS, ERROR_STATUS, EDITION_NULL_ONLY, 'garbage', null];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            numFound: shapes.length,
+            start: 0,
+            docs: shapes.map((availability, i) => ({
+              key: `/works/OL${i + 1}W`,
+              title: `Work ${i + 1}`,
+              ia: [`item${i}`],
+              availability,
+            })),
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await runToolContract(openlibrarySearchBooks, {
+      query: 'moby dick',
+      limit: 50,
+      include_availability: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const works = (result.structuredContent as { works: Array<{ availability: unknown }> }).works;
+    expect(works).toHaveLength(shapes.length);
+    expect(works.map((w) => w.availability)).toEqual([
+      expect.objectContaining({ status: 'borrow_available', is_restricted: true }),
+      { status: 'open', is_previewable: true, is_restricted: false },
+      { status: 'error' },
+      expect.not.objectContaining({ openlibrary_edition: expect.anything() }),
+      null,
+      null,
+    ]);
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('**Availability:** Status: error\n');
+    expect(text).toContain('**Availability:** Status: open | Preview: true | Restricted: false');
+    expect(text).toContain('No availability returned');
+    expect(text).not.toContain('null');
+  });
+});
+
+/**
+ * `OL17952222M` is the live example: its record carries `oclc_number:
+ * ["61224395"]` with `oclc_numbers: null`.
+ */
+describe('OpenLibraryService — OCLC number merging', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function oclcFor(details: Record<string, unknown>) {
+    mockFetchRoutes({
+      '/api/books': { 'OLID:OL17952222M': { details: { key: '/books/OL17952222M', ...details } } },
+    });
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL17952222M'],
+      'olid',
+      createMockContext(),
+    );
+    return editions[0]?.oclc;
+  }
+
+  it.each([
+    ['only oclc_number', { oclc_number: ['61224395'], oclc_numbers: null }, ['61224395']],
+    ['only oclc_numbers', { oclc_numbers: ['244767413'] }, ['244767413']],
+    [
+      'both keys, overlapping',
+      { oclc_numbers: ['1', '2'], oclc_number: ['2', '3'] },
+      ['1', '2', '3'],
+    ],
+    ['both keys, distinct', { oclc_number: ['9'], oclc_numbers: ['8', '7'] }, ['9', '8', '7']],
+    ['neither key', {}, []],
+    ['both null', { oclc_number: null, oclc_numbers: null }, []],
+    ['a duplicate within one key', { oclc_numbers: ['5', '5'] }, ['5']],
+  ])('merges %s', async (_label, details, expected) => {
+    expect(await oclcFor(details)).toEqual(expected);
+  });
+});
+
 describe('OpenLibraryService — getSubject', () => {
   beforeEach(() => {
     initOpenLibraryService();
@@ -462,6 +721,26 @@ describe('OpenLibraryService — edition batch mapping', () => {
     expect(unresolved).toEqual([]);
   });
 
+  // The bibkeys response is keyed by the bibkey as sent, so the check digit is
+  // canonicalized once, here, and the caller's spelling is what comes back.
+  it('sends an ISBN-10 X check digit upstream in upper case and resolves it', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': {
+        'ISBN:080442957X': { details: { key: '/books/OL2838295M', title: 'Prophecy' } },
+      },
+    });
+
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['0-8044-2957-x'],
+      'isbn',
+      createMockContext(),
+    );
+
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain('ISBN%3A080442957X');
+    expect(editions.map((e) => e.edition_id)).toEqual(['OL2838295M']);
+    expect(unresolved).toEqual([]);
+  });
+
   it('resolves the whole batch in one request, in request order', async () => {
     const fetchSpy = mockFetchRoutes({
       '/api/books': {
@@ -539,9 +818,15 @@ describe('OpenLibraryService — edition batch mapping', () => {
         },
       },
       '/works/OL1168083W.json': {
+        key: '/works/OL1168083W',
+        type: { key: '/type/work' },
         authors: [{ author: { key: '/authors/OL118077A' }, type: { key: '/type/author_role' } }],
       },
-      '/authors/OL118077A.json': { name: 'George Orwell' },
+      '/authors/OL118077A.json': {
+        key: '/authors/OL118077A',
+        type: { key: '/type/author' },
+        name: 'George Orwell',
+      },
     });
 
     const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
@@ -566,7 +851,11 @@ describe('OpenLibraryService — edition batch mapping', () => {
           },
         },
       },
-      '/works/OL999W.json': { key: '/works/OL999W', title: 'Anonymous Pamphlet' },
+      '/works/OL999W.json': {
+        key: '/works/OL999W',
+        type: { key: '/type/work' },
+        title: 'Anonymous Pamphlet',
+      },
     });
 
     const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
@@ -602,7 +891,11 @@ describe('OpenLibraryService — edition batch mapping', () => {
           details: { ...CONCORDE, authors: undefined },
         },
       },
-      '/works/OL3668495W.json': { authors: [{ author: { key: '/authors/OL631509A' } }] },
+      '/works/OL3668495W.json': {
+        key: '/works/OL3668495W',
+        type: { key: '/type/work' },
+        authors: [{ author: { key: '/authors/OL631509A' } }],
+      },
       // /authors/OL631509A.json is unrouted and 404s.
     });
 
@@ -642,6 +935,7 @@ describe('OpenLibraryService — cover and photo sentinel filtering', () => {
     mockFetchRoutes({
       '/works/OL1812244W.json': {
         key: '/works/OL1812244W',
+        type: { key: '/type/work' },
         title: 'Magicats!',
         covers: RAW_COVERS,
       },
@@ -706,6 +1000,7 @@ describe('OpenLibraryService — cover and photo sentinel filtering', () => {
     mockFetchRoutes({
       '/authors/OL23919A.json': {
         key: '/authors/OL23919A',
+        type: { key: '/type/author' },
         name: 'Isaac Asimov',
         photos: [5543033, -1],
       },
@@ -719,7 +1014,12 @@ describe('OpenLibraryService — cover and photo sentinel filtering', () => {
   // array already reads that way — the sentinel would not.
   it('yields an empty array when every entry is a sentinel', async () => {
     mockFetchRoutes({
-      '/works/OL999W.json': { key: '/works/OL999W', title: 'Coverless', covers: [-1] },
+      '/works/OL999W.json': {
+        key: '/works/OL999W',
+        type: { key: '/type/work' },
+        title: 'Coverless',
+        covers: [-1],
+      },
     });
 
     const work = await getOpenLibraryService().getWork('OL999W', createMockContext());
@@ -728,7 +1028,12 @@ describe('OpenLibraryService — cover and photo sentinel filtering', () => {
 
   it('leaves an all-usable array untouched', async () => {
     mockFetchRoutes({
-      '/works/OL45804W.json': { key: '/works/OL45804W', title: 'Gatsby', covers: [9255566, 123] },
+      '/works/OL45804W.json': {
+        key: '/works/OL45804W',
+        type: { key: '/type/work' },
+        title: 'Gatsby',
+        covers: [9255566, 123],
+      },
     });
 
     const work = await getOpenLibraryService().getWork('OL45804W', createMockContext());
@@ -982,6 +1287,813 @@ describe('OpenLibraryService — merged author redirects', () => {
   });
 });
 
+/**
+ * Open Library keeps a merged work as a `/type/redirect` stub: `works/{id}.json`
+ * answers 200 naming its successor while `works/{id}/editions.json` 404s.
+ * `OL2714496W` → `OL2714491W` is the live one-hop example and
+ * `OL5687942W` → `OL2968844W` → `OL2968802W` → `OL2968606W` the live three-hop
+ * chain; the stub bodies below carry the fields those records return.
+ *
+ * Every case asserts the upstream request count: `null` is also what a resolver
+ * that never followed the chain, or followed it forever, would return.
+ */
+describe('OpenLibraryService — merged work redirects', () => {
+  function workStub(id: string, location: unknown): Record<string, unknown> {
+    return {
+      key: `/works/${id}`,
+      type: { key: '/type/redirect' },
+      ...(location === undefined ? {} : { location }),
+      created: { type: '/type/datetime', value: '2009-12-10T00:16:59.713837' },
+      last_modified: { type: '/type/datetime', value: '2024-06-28T18:06:18.387122' },
+    };
+  }
+
+  function liveWork(id: string, title: string): Record<string, unknown> {
+    // A live work carries no `location` key at all, unlike a live author.
+    return {
+      key: `/works/${id}`,
+      type: { key: '/type/work' },
+      title,
+      subjects: ['Self-help'],
+      covers: [6481234],
+      authors: [{ type: { key: '/type/author_role' }, author: { key: '/authors/OL1234A' } }],
+    };
+  }
+
+  const CANONICAL_EDITIONS = {
+    size: 14,
+    entries: [{ key: '/books/OL9M', title: 'The little book of letting go', works: [] }],
+  };
+
+  /** A chain of `length` stubs `OL100W → OL101W → …`, ending at `OL1{length}W`. */
+  function stubChain(length: number): Record<string, unknown> {
+    const routes: Record<string, unknown> = {};
+    for (let i = 0; i < length; i++) {
+      routes[`/works/OL${100 + i}W.json`] = workStub(`OL${100 + i}W`, `/works/OL${101 + i}W`);
+    }
+    return routes;
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ─── getWork ───────────────────────────────────────────────────────────────
+
+  it('getWork costs one request for a live work and reports its own ID', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    const work = await getOpenLibraryService().getWork('OL2714491W', createMockContext());
+
+    expect(work?.work_id).toBe('OL2714491W');
+    expect(work?.title).toBe('The little book of letting go');
+    expect(work?.author_ids).toEqual(['OL1234A']);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('getWork follows a one-hop merge stub to the canonical record', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    const work = await getOpenLibraryService().getWork('OL2714496W', createMockContext());
+
+    // The stub has a key and no title, so the pre-fix guard returned it hollow.
+    expect(work?.title).toBe('The little book of letting go');
+    expect(work?.work_id).toBe('OL2714491W');
+    expect(work?.subjects).toEqual(['Self-help']);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('getWork follows a three-hop chain and accepts a /works/ prefix', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL5687942W.json': workStub('OL5687942W', '/works/OL2968844W'),
+      '/works/OL2968844W.json': workStub('OL2968844W', '/works/OL2968802W'),
+      '/works/OL2968802W.json': workStub('OL2968802W', '/works/OL2968606W'),
+      '/works/OL2968606W.json': liveWork('OL2968606W', 'Into the Blue'),
+    });
+
+    const work = await getOpenLibraryService().getWork('/works/OL5687942W', createMockContext());
+
+    expect(work?.work_id).toBe('OL2968606W');
+    expect(work?.title).toBe('Into the Blue');
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('getWork resolves a chain exactly at the hop cap', async () => {
+    const hops = MAX_WORK_REDIRECT_HOPS;
+    const fetchSpy = mockFetchRoutes({
+      ...stubChain(hops),
+      [`/works/OL${100 + hops}W.json`]: liveWork(`OL${100 + hops}W`, 'End of the chain'),
+    });
+
+    const work = await getOpenLibraryService().getWork('OL100W', createMockContext());
+
+    expect(work?.work_id).toBe(`OL${100 + hops}W`);
+    expect(fetchSpy).toHaveBeenCalledTimes(hops + 1);
+  });
+
+  it('getWork gives up one hop past the cap instead of walking the whole chain', async () => {
+    // 20 stubs, with a real work at the far end the resolver must never reach.
+    const fetchSpy = mockFetchRoutes({
+      ...stubChain(20),
+      '/works/OL120W.json': liveWork('OL120W', 'Unreachable'),
+    });
+
+    await expect(
+      getOpenLibraryService().getWork('OL100W', createMockContext()),
+    ).resolves.toBeNull();
+
+    // The starting record plus MAX_WORK_REDIRECT_HOPS followed hops, then stop.
+    expect(fetchSpy).toHaveBeenCalledTimes(MAX_WORK_REDIRECT_HOPS + 1);
+  });
+
+  it('getWork stops on a circular redirect without spending the hop cap', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL1111W.json': workStub('OL1111W', '/works/OL2222W'),
+      '/works/OL2222W.json': workStub('OL2222W', '/works/OL1111W'),
+    });
+
+    await expect(
+      getOpenLibraryService().getWork('OL1111W', createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('getWork stops on a stub that points at itself', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL1111W.json': workStub('OL1111W', '/works/OL1111W'),
+    });
+
+    await expect(
+      getOpenLibraryService().getWork('OL1111W', createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a null location', null],
+    ['an absent location', undefined],
+    ['an empty location', ''],
+    ['an author location', '/authors/OL34184A'],
+    ['an edition location', '/books/OL7353617M'],
+    ['a lowercase work location', '/works/ol2714491w'],
+    ['a non-string location', 2714491],
+  ])(
+    'getWork fails closed on a stub with %s, never fetching a guessed path',
+    async (_label, location) => {
+      const fetchSpy = mockFetchRoutes({
+        '/works/OL2714496W.json': workStub('OL2714496W', location),
+        // Reachable only if the resolver guessed at a target.
+        '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+      });
+
+      await expect(
+        getOpenLibraryService().getWork('OL2714496W', createMockContext()),
+      ).resolves.toBeNull();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('getWork fails closed when a hop mid-chain 404s', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL5687942W.json': workStub('OL5687942W', '/works/OL2968844W'),
+      // OL2968844W is unrouted and 404s.
+    });
+
+    await expect(
+      getOpenLibraryService().getWork('OL5687942W', createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // Open Library 301s `/works/OL…M.json` and `/works/OL…A.json` to the edition
+  // and author records, and native fetch follows the 301 — so a work lookup can
+  // be answered 200 by a record of the wrong type. The edition shape below
+  // (`authors[].key`, no `author` wrapper) is what crashed the work mapper.
+  it.each([
+    [
+      'an edition',
+      'OL7353617M',
+      {
+        key: '/books/OL7353617M',
+        type: { key: '/type/edition' },
+        title: 'Fantastic Mr. Fox',
+        authors: [{ key: '/authors/OL34184A' }],
+        works: [{ key: '/works/OL45804W' }],
+      },
+    ],
+    [
+      'an author',
+      'OL34184A',
+      { key: '/authors/OL34184A', type: { key: '/type/author' }, name: 'Roald Dahl' },
+    ],
+  ])('getWork reports %s record answering a work URL as absent', async (_label, id, record) => {
+    const fetchSpy = mockFetchRoutes({ [`/works/${id}.json`]: record });
+
+    await expect(getOpenLibraryService().getWork(id, createMockContext())).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('getWork rejects a stub whose target is not a work record', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': { key: '/books/OL2714491M', type: { key: '/type/edition' } },
+    });
+
+    await expect(
+      getOpenLibraryService().getWork('OL2714496W', createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── getEditions ───────────────────────────────────────────────────────────
+
+  it('getEditions costs one request for a live work', async () => {
+    const fetchSpy = mockFetchRoutes({ '/works/OL2714491W/editions.json': CANONICAL_EDITIONS });
+
+    const result = await getOpenLibraryService().getEditions(
+      'OL2714491W',
+      10,
+      0,
+      createMockContext(),
+    );
+
+    expect(result?.work_id).toBe('OL2714491W');
+    expect(result?.total).toBe(14);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("getEditions resolves a merge stub after a null page and re-pages under the canonical ID with the caller's limit and offset", async () => {
+    const fetchSpy = mockFetchRoutes({
+      // The stub's own editions page is unrouted, so it 404s exactly as upstream.
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+      '/works/OL2714491W/editions.json': CANONICAL_EDITIONS,
+    });
+
+    const result = await getOpenLibraryService().getEditions(
+      'OL2714496W',
+      3,
+      6,
+      createMockContext(),
+    );
+
+    expect(result?.work_id).toBe('OL2714491W');
+    expect(result?.editions[0]?.edition_id).toBe('OL9M');
+    const urls = fetchSpy.mock.calls.map(([input]: [unknown]) => requestUrl(input));
+    expect(urls).toEqual([
+      expect.stringContaining('/works/OL2714496W/editions.json?limit=3&offset=6'),
+      expect.stringContaining('/works/OL2714496W.json'),
+      expect.stringContaining('/works/OL2714491W.json'),
+      expect.stringContaining('/works/OL2714491W/editions.json?limit=3&offset=6'),
+    ]);
+  });
+
+  it('getEditions follows a three-hop chain', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL5687942W.json': workStub('OL5687942W', '/works/OL2968844W'),
+      '/works/OL2968844W.json': workStub('OL2968844W', '/works/OL2968802W'),
+      '/works/OL2968802W.json': workStub('OL2968802W', '/works/OL2968606W'),
+      '/works/OL2968606W.json': liveWork('OL2968606W', 'Into the Blue'),
+      '/works/OL2968606W/editions.json': { size: 2, entries: [] },
+    });
+
+    const result = await getOpenLibraryService().getEditions(
+      'OL5687942W',
+      10,
+      0,
+      createMockContext(),
+    );
+
+    expect(result?.work_id).toBe('OL2968606W');
+    // Null page, four records, then the canonical page.
+    expect(fetchSpy).toHaveBeenCalledTimes(6);
+  });
+
+  it('getEditions reports an absent ID as null after one resolution request', async () => {
+    const fetchSpy = mockFetchRoutes({});
+
+    await expect(
+      getOpenLibraryService().getEditions('OL999999999W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // A live work whose editions page 404s must not send the resolver back to the
+  // page it just asked for.
+  it('getEditions returns null without re-requesting when the ID resolves to itself', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    await expect(
+      getOpenLibraryService().getEditions('OL2714491W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('getEditions gives up one hop past the cap', async () => {
+    const fetchSpy = mockFetchRoutes(stubChain(20));
+
+    await expect(
+      getOpenLibraryService().getEditions('OL100W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1 + MAX_WORK_REDIRECT_HOPS + 1);
+  });
+
+  it('getEditions stops on a circular redirect', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL1111W.json': workStub('OL1111W', '/works/OL2222W'),
+      '/works/OL2222W.json': workStub('OL2222W', '/works/OL1111W'),
+    });
+
+    await expect(
+      getOpenLibraryService().getEditions('OL1111W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('getEditions fails closed on a stub whose location is not a work OLID', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/authors/OL34184A'),
+    });
+
+    await expect(
+      getOpenLibraryService().getEditions('OL2714496W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── Tool and resource surfaces ────────────────────────────────────────────
+
+  /** Text of every content block, joined. */
+  function contentText(result: { content: unknown[] }): string {
+    return result.content
+      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+      .join('\n');
+  }
+
+  it('openlibrary_get_work reports the canonical ID and discloses the substitution on both surfaces', async () => {
+    mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL2714496W' });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { work_id: string; notice?: string };
+    expect(structured.work_id).toBe('OL2714491W');
+    expect(structured.notice).toContain('OL2714496W');
+    expect(structured.notice).toContain('OL2714491W');
+    expect(contentText(result)).toContain(structured.notice as string);
+    expect(openlibraryGetWork.output.parse(structured).work_id).toBe('OL2714491W');
+  });
+
+  it('openlibrary_get_work adds no notice for a live work', async () => {
+    mockFetchRoutes({
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: '/works/OL2714491W' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  // `notice` is last-wins, so a merged work with a capped subject list must
+  // carry both disclosures in one string rather than losing the first.
+  it('openlibrary_get_work joins the merge notice with the subject-cap notice', async () => {
+    mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': {
+        ...liveWork('OL2714491W', 'The little book of letting go'),
+        subjects: Array.from({ length: 12 }, (_, i) => `subject-${i}`),
+      },
+    });
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL2714496W' });
+
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toContain('OL2714496W');
+    expect(notice).toContain('OL2714491W');
+    expect(notice).toContain('showing 10 of 12');
+  });
+
+  it('openlibrary_get_work reports not_found for a stub whose location is not a work OLID', async () => {
+    mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL7353617M'),
+    });
+
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL2714496W' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } },
+    });
+  });
+
+  it('openlibrary_get_editions reports the canonical ID and discloses the substitution on both surfaces', async () => {
+    mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+      '/works/OL2714491W/editions.json': CANONICAL_EDITIONS,
+    });
+
+    const result = await runToolContract(openlibraryGetEditions, {
+      work_id: 'OL2714496W',
+      limit: 3,
+      offset: 6,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      work_id: string;
+      offset: number;
+      notice?: string;
+    };
+    expect(structured.work_id).toBe('OL2714491W');
+    // The retry keeps the caller's page, and the echo is the requested offset.
+    expect(structured.offset).toBe(6);
+    expect(structured.notice).toContain('OL2714496W');
+    expect(structured.notice).toContain('OL2714491W');
+    expect(contentText(result)).toContain(structured.notice as string);
+    expect(openlibraryGetEditions.output.parse(structured).work_id).toBe('OL2714491W');
+  });
+
+  it('openlibrary_get_editions adds no notice for a live work', async () => {
+    mockFetchRoutes({ '/works/OL2714491W/editions.json': CANONICAL_EDITIONS });
+
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL2714491W' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('the work resource returns the canonical record for a merged ID', async () => {
+    mockFetchRoutes({
+      '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
+      '/works/OL2714491W.json': liveWork('OL2714491W', 'The little book of letting go'),
+    });
+
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL2714496W' });
+    const ctx = createMockContext({ uri: new URL('openlibrary://works/OL2714496W') });
+    const result = await openlibraryWorkResource.handler(params, ctx);
+
+    expect(result.title).toBe('The little book of letting go');
+    // The resource has no enrichment channel; its work_id is the only signal.
+    expect(result.work_id).toBe('OL2714491W');
+  });
+
+  // The resource takes no input pattern, so an edition OLID reaches the service.
+  it('the work resource reports an edition OLID as NotFound, not an InternalError', async () => {
+    mockFetchRoutes({
+      '/works/OL7353617M.json': {
+        key: '/books/OL7353617M',
+        type: { key: '/type/edition' },
+        authors: [{ key: '/authors/OL34184A' }],
+      },
+    });
+
+    const params = openlibraryWorkResource.params!.parse({ work_id: 'OL7353617M' });
+    const ctx = createMockContext({ uri: new URL('openlibrary://works/OL7353617M') });
+    const error = await Promise.resolve(openlibraryWorkResource.handler(params, ctx)).catch(
+      (e) => e,
+    );
+
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+  });
+});
+
+/**
+ * Open Library 301s `/authors/OL…W.json` and `/authors/OL…M.json` to the work
+ * and edition records, and native fetch follows the 301 — so an author lookup
+ * can be answered 200 by a record of another type. Only a `/type/author` record
+ * is an author, whether reached directly or at the end of a redirect chain.
+ */
+describe('OpenLibraryService — author lookups reject records of another type', () => {
+  const WORK_AT_AUTHOR_URL = {
+    key: '/works/OL45804W',
+    type: { key: '/type/work' },
+    title: 'Fantastic Mr Fox',
+    authors: [{ author: { key: '/authors/OL34184A' } }],
+  };
+  const EDITION_AT_AUTHOR_URL = {
+    key: '/books/OL7353617M',
+    type: { key: '/type/edition' },
+    title: 'Fantastic Mr. Fox',
+    authors: [{ key: '/authors/OL34184A' }],
+  };
+  const LIVE_AUTHOR = {
+    key: '/authors/OL23919A',
+    type: { key: '/type/author' },
+    name: 'J. K. Rowling',
+    location: null,
+  };
+
+  function contentText(result: { content: unknown[] }): string {
+    return result.content
+      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+      .join('\n');
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['a work', 'OL45804W', WORK_AT_AUTHOR_URL],
+    ['an edition', 'OL7353617M', EDITION_AT_AUTHOR_URL],
+  ])(
+    'getAuthor reports %s record answering an author URL as absent',
+    async (_label, id, record) => {
+      const fetchSpy = mockFetchRoutes({ [`/authors/${id}.json`]: record });
+
+      await expect(getOpenLibraryService().getAuthor(id, createMockContext())).resolves.toBeNull();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('getAuthor rejects a redirect whose target answers with a work record', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL19981A',
+      },
+      '/authors/OL19981A.json': { ...WORK_AT_AUTHOR_URL, key: '/works/OL19981W' },
+    });
+
+    await expect(
+      getOpenLibraryService().getAuthor('OL2162284A', createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('getAuthorWorks reports a work ID as absent after one resolution request', async () => {
+    // The works subresource 404s for a non-author ID, so the resolver runs.
+    const fetchSpy = mockFetchRoutes({ '/authors/OL45804W.json': WORK_AT_AUTHOR_URL });
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('OL45804W', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('openlibrary_get_author fails not_found with no merge notice for a work ID', async () => {
+    mockFetchRoutes({ '/authors/OL45804W.json': WORK_AT_AUTHOR_URL });
+
+    const result = await runToolContract(openlibraryGetAuthor, { author_id: 'OL45804W' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } },
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('merged record');
+  });
+
+  it('openlibrary_get_author_works fails not_found with no merge notice for a work ID', async () => {
+    mockFetchRoutes({ '/authors/OL45804W.json': WORK_AT_AUTHOR_URL });
+
+    const result = await runToolContract(openlibraryGetAuthorWorks, { author_id: 'OL45804W' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } },
+    });
+    expect(contentText(result)).not.toContain('merged record');
+  });
+
+  it('the author resource reports an edition OLID as NotFound', async () => {
+    mockFetchRoutes({ '/authors/OL7353617M.json': EDITION_AT_AUTHOR_URL });
+
+    const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL7353617M' });
+    const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL7353617M') });
+    const error = await Promise.resolve(openlibraryAuthorResource.handler(params, ctx)).catch(
+      (e) => e,
+    );
+
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+  });
+
+  // No input pattern narrows `author_id`: every form Open Library answers with
+  // an author record keeps resolving.
+  it.each([
+    ['a bare OLID', 'OL23919A', '/authors/OL23919A.json'],
+    ['an /authors/-prefixed OLID', '/authors/OL23919A', '/authors/OL23919A.json'],
+    ['a lowercase OLID the upstream answers', 'ol23919a', '/authors/ol23919a.json'],
+  ])('openlibrary_get_author still resolves %s', async (_label, authorId, path) => {
+    const fetchSpy = mockFetchRoutes({ [path]: LIVE_AUTHOR });
+
+    const result = await runToolContract(openlibraryGetAuthor, { author_id: authorId });
+
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetAuthor.output.parse(result.structuredContent);
+    expect(structured.author_id).toBe('OL23919A');
+    expect(structured.name).toBe('J. K. Rowling');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * An edition with no inline authors takes its credits from the parent work. When
+ * that parent was merged away, `works/{id}.json` answers with a redirect stub
+ * carrying no `authors`, so the credits live on the canonical work; when a
+ * credited author was merged away, its stub carries no `name`, so the name and
+ * the stable ID live on the canonical author.
+ */
+describe('OpenLibraryService — edition author enrichment through merged works and authors', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('recovers the credits from the canonical work when the parent work is a merge stub', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': {
+        'OLID:OL5M': {
+          details: {
+            key: '/books/OL5M',
+            title: 'Stubbed Parent',
+            works: [{ key: '/works/OL2714496W' }],
+          },
+        },
+      },
+      '/works/OL2714496W.json': {
+        key: '/works/OL2714496W',
+        type: { key: '/type/redirect' },
+        location: '/works/OL2714491W',
+      },
+      '/works/OL2714491W.json': {
+        key: '/works/OL2714491W',
+        type: { key: '/type/work' },
+        authors: [{ author: { key: '/authors/OL1234A' } }],
+      },
+      '/authors/OL1234A.json': {
+        key: '/authors/OL1234A',
+        type: { key: '/type/author' },
+        name: 'Real Author',
+      },
+    });
+
+    const { editions, authorGaps } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL5M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([
+      { name: 'Real Author', author_id: 'OL1234A', source: 'work' },
+    ]);
+    expect(authorGaps).toEqual({ failed: [], skipped: [] });
+    // bibkeys, stub, canonical work, author.
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('recovers no credits, without a gap, when the parent stub names no work', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books': {
+        'OLID:OL5M': {
+          details: {
+            key: '/books/OL5M',
+            title: 'Broken Parent',
+            works: [{ key: '/works/OL2714496W' }],
+          },
+        },
+      },
+      '/works/OL2714496W.json': {
+        key: '/works/OL2714496W',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL1234A',
+      },
+    });
+
+    const { editions, authorGaps } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL5M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([]);
+    expect(authorGaps).toEqual({ failed: [], skipped: [] });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  /** An edition with no inline authors whose live parent work credits `authorKey`. */
+  function creditedBy(authorKey: string): Record<string, unknown> {
+    return {
+      '/api/books': {
+        'OLID:OL5M': {
+          details: { key: '/books/OL5M', title: 'Credited', works: [{ key: '/works/OL5W' }] },
+        },
+      },
+      '/works/OL5W.json': {
+        key: '/works/OL5W',
+        type: { key: '/type/work' },
+        authors: [{ author: { key: authorKey } }],
+      },
+    };
+  }
+
+  // `/authors/OL2162284A.json` is a live merge stub pointing at OL19981A.
+  it('credits the canonical author, by ID and name, when the credited author is a merge stub', async () => {
+    const fetchSpy = mockFetchRoutes({
+      ...creditedBy('/authors/OL2162284A'),
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL19981A',
+      },
+      '/authors/OL19981A.json': {
+        key: '/authors/OL19981A',
+        type: { key: '/type/author' },
+        name: 'Stephen King',
+        location: null,
+      },
+    });
+
+    const { editions, authorGaps } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL5M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([
+      { name: 'Stephen King', author_id: 'OL19981A', source: 'work' },
+    ]);
+    expect(authorGaps).toEqual({ failed: [], skipped: [] });
+    // bibkeys, work, author stub, canonical author.
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps the credited ID as the name, without a gap, when the author stub resolves to nothing', async () => {
+    const fetchSpy = mockFetchRoutes({
+      ...creditedBy('/authors/OL2162284A'),
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL19981A',
+      },
+      // OL19981A is unrouted and 404s.
+    });
+
+    const { editions, authorGaps } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL5M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([
+      { name: 'OL2162284A', author_id: 'OL2162284A', source: 'work' },
+    ]);
+    expect(authorGaps).toEqual({ failed: [], skipped: [] });
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  // Per the author resolver's type check, a work answering an author URL is not
+  // an author: the credit keeps its ID, and it is no gap.
+  it('keeps the credited ID as the name, without a gap, when the credit names a non-author record', async () => {
+    const fetchSpy = mockFetchRoutes({
+      ...creditedBy('/authors/OL45804W'),
+      '/authors/OL45804W.json': {
+        key: '/works/OL45804W',
+        type: { key: '/type/work' },
+        title: 'Fantastic Mr Fox',
+      },
+    });
+
+    const { editions, authorGaps } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL5M'],
+      'olid',
+      createMockContext(),
+    );
+
+    expect(editions[0]?.authors).toEqual([
+      { name: 'OL45804W', author_id: 'OL45804W', source: 'work' },
+    ]);
+    expect(authorGaps).toEqual({ failed: [], skipped: [] });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe('OpenLibraryService — edition batch enrichment concurrency', () => {
   /**
    * Enough editions that the ungated fan-out is unmistakable: none carry inline
@@ -1015,10 +2127,16 @@ describe('OpenLibraryService — edition batch enrichment concurrency', () => {
         },
       };
       routes[`/works/${workId}.json`] = {
+        key: `/works/${workId}`,
+        type: { key: '/type/work' },
         authors: authorIds.map((id) => ({ author: { key: `/authors/${id}` } })),
       };
       for (const id of authorIds) {
-        routes[`/authors/${id}.json`] = { name: `Author ${id}` };
+        routes[`/authors/${id}.json`] = {
+          key: `/authors/${id}`,
+          type: { key: '/type/author' },
+          name: `Author ${id}`,
+        };
       }
     }
 

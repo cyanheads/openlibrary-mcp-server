@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
@@ -17,7 +18,7 @@ const SNIPPETS_TEXT_CAP = 3;
 export const openlibrarySearchInside = tool('openlibrary_search_inside', {
   title: 'Search Inside Books',
   description:
-    'Search the full text of books scanned by the Internet Archive — the "which book contains this passage?" lookup that the metadata tools cannot answer. Quote a phrase for an exact-phrase match; bare terms match anywhere in the text. Each result is an Internet Archive item with the matching passages as snippets, plus a relevance score. The full-text index is an order of magnitude slower than the metadata endpoints (seconds, not milliseconds), so reach for it when the passage is the question, not as a general book search — use openlibrary_search_books for title, author, or subject. Results key on Internet Archive items rather than Open Library works: chain the returned ia_identifier to archive.org, or match it against the ia_identifiers on openlibrary_search_books results to reach the catalogue record.',
+    'Search the full text of books scanned by the Internet Archive — the "which book contains this passage?" lookup that the metadata tools cannot answer. Quote a phrase for an exact-phrase match; bare terms match anywhere in the text. Each result is an Internet Archive item with the matching passages as snippets, plus a relevance score. The full-text index is far slower than the metadata endpoints, and a search usually takes 10–30 seconds. Use it when the passage is the question, and use openlibrary_search_books to search by title, author, or subject. Results key on Internet Archive items rather than Open Library works: chain the returned ia_identifier to archive.org, or match it against the ia_identifiers on openlibrary_search_books results to reach the catalogue record.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -74,6 +75,19 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
       )
       .describe('Matching items, up to limit, ordered by relevance.'),
   }),
+
+  errors: [
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: "Open Library's full-text search answered HTTP 200 without a result set — no hits object carrying a total.",
+      recovery:
+        "Open Library's full-text search failed to answer, which says nothing about whether the passage exists — wait a few seconds and retry the same query unchanged.",
+      retryable: true,
+      // The service classifies the malformed body below the handler.
+      thrownBy: 'service',
+    },
+  ],
 
   /** Agent-facing context: total match count, empty-result and snippet-cap notices. */
   enrichment: {

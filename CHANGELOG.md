@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-08
+
+Built on mcp-ts-core 0.13.14: tool errors end with their request ID, upstream fetch errors name only the origin, tool arguments sent as numeric strings, lone strings for lists, or nulls for optional fields are repaired before validation, and the Docker image installs dependencies in a native-platform stage.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24
 
 Every Open Library lookup now ends inside a 50 s deadline with a classified error, openlibrary_get_edition resolves again through /api/books.json, and work and author IDs resolve only to records of their own type, following merge redirects.

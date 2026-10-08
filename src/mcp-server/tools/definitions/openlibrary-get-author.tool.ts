@@ -73,11 +73,7 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
     const svc = getOpenLibraryService();
     const result = await svc.getAuthor(input.author_id, ctx);
     if (!result) {
-      throw ctx.fail(
-        'not_found',
-        `Author ${input.author_id} not found on Open Library.`,
-        ctx.recoveryFor('not_found'),
-      );
+      throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
     }
     // A merged author stays reachable under its old ID, so the record returned can
     // be a different author's than was asked for. `format()` never sees the input,

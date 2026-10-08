@@ -47,21 +47,23 @@ describe('openlibraryGetWork — edge cases and security', () => {
 
   // ─── Not found error contract ────────────────────────────────────────────────
 
-  it('throws not_found via ctx.fail when service returns null (non-existent work)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetWork.errors });
+  it('fails as not_found when service returns null (non-existent work)', async () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getWork').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetWork.input.parse({ work_id: 'OL999999999W' });
-    await expect(openlibraryGetWork.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'not_found',
-        // The declared hint must reach the wire, not just live in errors[].
-        recovery: {
-          hint: openlibraryGetWork.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL999999999W' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          // The declared hint must reach the wire, not just live in errors[].
+          recovery: {
+            hint: openlibraryGetWork.errors!.find((e) => e.reason === 'not_found')!.recovery,
+          },
         },
       },
     });

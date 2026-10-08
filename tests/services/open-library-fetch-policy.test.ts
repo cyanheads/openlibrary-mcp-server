@@ -369,12 +369,7 @@ describe('getEditionsByIdentifiers — the bibkeys route', () => {
       expect(error).toBeInstanceOf(McpError);
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.ServiceUnavailable,
-        data: {
-          reason: 'upstream_unavailable',
-          retryable: true,
-          status,
-          recovery: { hint: upstreamUnavailableHint() },
-        },
+        data: { reason: 'upstream_unavailable', retryable: true, status },
       });
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     },
@@ -417,7 +412,7 @@ describe('getEditionsByIdentifiers — the bibkeys route', () => {
 
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'upstream_unavailable', recovery: { hint: upstreamUnavailableHint() } },
+      data: { reason: 'upstream_unavailable' },
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
@@ -437,26 +432,39 @@ describe('getEditionsByIdentifiers — the bibkeys route', () => {
     expect((error as McpError).data?.reason).toBeUndefined();
   });
 
-  it('puts upstream_unavailable on both client surfaces of openlibrary_get_edition', async () => {
-    serve(() => Promise.resolve(new Response('', { status: 404, statusText: 'Not Found' })));
+  it.each([
+    ['an HTTP 404', () => new Response('', { status: 404, statusText: 'Not Found' })],
+    [
+      'a 2xx HTML page',
+      () =>
+        new Response('<html><body>maintenance</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        }),
+    ],
+  ])(
+    'puts upstream_unavailable for %s on both client surfaces of openlibrary_get_edition',
+    async (_label, response) => {
+      serve(() => Promise.resolve(response()));
 
-    const result = await runToolContract(openlibraryGetEdition, {
-      identifiers: ['9780140328721'],
-      id_type: 'isbn',
-    });
+      const result = await runToolContract(openlibraryGetEdition, {
+        identifiers: ['9780140328721'],
+        id_type: 'isbn',
+      });
 
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      error: {
-        code: JsonRpcErrorCode.ServiceUnavailable,
-        data: { reason: 'upstream_unavailable', recovery: { hint: upstreamUnavailableHint() } },
-      },
-    });
-    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
-    expect(text).toContain(upstreamUnavailableHint());
-    expect(text).toContain('upstream_unavailable');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-  });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'upstream_unavailable', recovery: { hint: upstreamUnavailableHint() } },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain(upstreamUnavailableHint());
+      expect(text).toContain('upstream_unavailable');
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 /**

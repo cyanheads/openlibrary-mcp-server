@@ -77,11 +77,7 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     const svc = getOpenLibraryService();
     const result = await svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
     if (!result) {
-      throw ctx.fail(
-        'not_found',
-        `Author ${input.author_id} not found on Open Library.`,
-        ctx.recoveryFor('not_found'),
-      );
+      throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
     }
     ctx.enrich.total(result.total);
     // Open Library keeps a merged author reachable under its old ID, so the works

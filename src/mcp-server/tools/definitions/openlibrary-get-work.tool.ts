@@ -87,11 +87,7 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     const svc = getOpenLibraryService();
     const result = await svc.getWork(input.work_id, ctx);
     if (!result) {
-      throw ctx.fail(
-        'not_found',
-        `Work ${input.work_id} not found on Open Library.`,
-        ctx.recoveryFor('not_found'),
-      );
+      throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
     }
 
     // `notice` is last-wins, so both disclosures are joined into one string.

@@ -252,7 +252,6 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         allMalformed
           ? `None of the ${unresolved.length} supplied identifiers are valid for id_type "${input.id_type}".`
           : `No edition found for any of the ${input.identifiers.length} identifiers of type "${input.id_type}".`,
-        ctx.recoveryFor(reason),
       );
     }
 

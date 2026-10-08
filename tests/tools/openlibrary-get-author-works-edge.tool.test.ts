@@ -48,21 +48,25 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
 
   // ─── Not found error contract ────────────────────────────────────────────────
 
-  it('throws not_found via ctx.fail when service returns null (non-existent author)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetAuthorWorks.errors });
+  it('fails as not_found when service returns null (non-existent author)', async () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getAuthorWorks').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL999999999A' });
-    await expect(openlibraryGetAuthorWorks.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'not_found',
-        // The declared hint must reach the wire, not just live in errors[].
-        recovery: {
-          hint: openlibraryGetAuthorWorks.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    const result = await runToolContract(openlibraryGetAuthorWorks, {
+      author_id: 'OL999999999A',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          // The declared hint must reach the wire, not just live in errors[].
+          recovery: {
+            hint: openlibraryGetAuthorWorks.errors!.find((e) => e.reason === 'not_found')!.recovery,
+          },
         },
       },
     });

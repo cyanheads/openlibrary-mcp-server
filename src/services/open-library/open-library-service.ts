@@ -1086,7 +1086,6 @@ export class OpenLibraryService {
           reason: 'upstream_unavailable',
           retryable: true,
           ...(typeof status === 'number' && { status }),
-          ...ctx.recoveryFor('upstream_unavailable'),
         },
         { cause: err },
       );
@@ -1211,11 +1210,7 @@ export class OpenLibraryService {
     if (typeof hits?.total !== 'number') {
       throw serviceUnavailable(
         "Open Library's full-text search answered HTTP 200 without a result set.",
-        {
-          reason: 'upstream_unavailable',
-          retryable: true,
-          ...ctx.recoveryFor('upstream_unavailable'),
-        },
+        { reason: 'upstream_unavailable', retryable: true },
       );
     }
 

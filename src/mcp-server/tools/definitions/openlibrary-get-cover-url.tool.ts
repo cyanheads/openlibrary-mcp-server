@@ -81,25 +81,19 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
       throw ctx.fail(
         'invalid_identifier',
         `"${input.identifier}" contains path separators or control characters.`,
-        ctx.recoveryFor('invalid_identifier'),
       );
     }
     if (input.target === 'author' && input.id_type === 'isbn') {
       throw ctx.fail(
         'invalid_target',
         'Author photos cannot be looked up by ISBN; use id_type "id" or "olid".',
-        ctx.recoveryFor('invalid_target'),
       );
     }
     // The Covers API serves a placeholder GIF rather than a 404, so a malformed
     // identifier is indistinguishable from a missing cover once the URL is built.
     const expected = coverIdentifierExpectation(input.identifier, input.id_type, input.target);
     if (expected) {
-      throw ctx.fail(
-        'invalid_identifier',
-        `"${input.identifier}" is not ${expected}.`,
-        ctx.recoveryFor('invalid_identifier'),
-      );
+      throw ctx.fail('invalid_identifier', `"${input.identifier}" is not ${expected}.`);
     }
     const svc = getOpenLibraryService();
     const url = svc.getCoverUrl(input.identifier, input.id_type, input.target, input.size);

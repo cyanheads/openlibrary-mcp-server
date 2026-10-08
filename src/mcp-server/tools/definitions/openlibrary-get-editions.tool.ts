@@ -108,11 +108,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     const svc = getOpenLibraryService();
     const result = await svc.getEditions(input.work_id, input.limit, input.offset, ctx);
     if (!result) {
-      throw ctx.fail(
-        'not_found',
-        `Work ${input.work_id} not found on Open Library.`,
-        ctx.recoveryFor('not_found'),
-      );
+      throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
     }
     ctx.enrich.total(result.total);
     // format() never sees the request, so a merged-ID substitution is disclosed

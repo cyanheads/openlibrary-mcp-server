@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
 import {
@@ -124,21 +124,23 @@ describe('openlibraryGetEdition', () => {
 
   // A batch of nothing but malformed values never reached upstream, so reporting
   // it as not-found would point the caller at the wrong correction.
-  it('throws invalid_identifier — not not_found — when every identifier is malformed', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+  it('fails as invalid_identifier — not not_found — when every identifier is malformed', async () => {
     const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers');
 
-    const input = openlibraryGetEdition.input.parse({
+    const result = await runToolContract(openlibraryGetEdition, {
       identifiers: ['notanisbn', '12345'],
       id_type: 'isbn',
     });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'invalid_identifier',
-        recovery: {
-          hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'invalid_identifier')!
-            .recovery,
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_identifier',
+          recovery: {
+            hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'invalid_identifier')!
+              .recovery,
+          },
         },
       },
     });
@@ -146,21 +148,23 @@ describe('openlibraryGetEdition', () => {
   });
 
   it('delivers the declared not_found recovery hint on the wire', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
     vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
       editions: [],
       unresolved: ['OL99999999M'],
       authorGaps: NO_GAPS,
     });
 
-    const input = openlibraryGetEdition.input.parse({
+    const result = await runToolContract(openlibraryGetEdition, {
       identifiers: ['OL99999999M'],
       id_type: 'olid',
     });
-    await expect(openlibraryGetEdition.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        recovery: {
-          hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          recovery: {
+            hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'not_found')!.recovery,
+          },
         },
       },
     });

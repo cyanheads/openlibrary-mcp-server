@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetAuthor } from '@/mcp-server/tools/definitions/openlibrary-get-author.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -49,21 +49,23 @@ describe('openlibraryGetAuthor — edge cases and security', () => {
     await expect(openlibraryGetAuthor.handler(input, ctx)).rejects.toThrow('Service unavailable');
   });
 
-  it('throws not_found via ctx.fail when service returns null (non-existent author)', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetAuthor.errors });
+  it('fails as not_found when service returns null (non-existent author)', async () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetAuthor.input.parse({ author_id: 'OL999999999A' });
-    await expect(openlibraryGetAuthor.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'not_found',
-        // The declared hint must reach the wire, not just live in errors[].
-        recovery: {
-          hint: openlibraryGetAuthor.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    const result = await runToolContract(openlibraryGetAuthor, { author_id: 'OL999999999A' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          // The declared hint must reach the wire, not just live in errors[].
+          recovery: {
+            hint: openlibraryGetAuthor.errors!.find((e) => e.reason === 'not_found')!.recovery,
+          },
         },
       },
     });

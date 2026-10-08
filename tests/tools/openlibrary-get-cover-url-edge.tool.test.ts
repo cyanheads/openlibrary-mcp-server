@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openlibraryGetCoverUrl } from '@/mcp-server/tools/definitions/openlibrary-get-cover-url.tool.js';
 import {
@@ -223,20 +223,29 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
     ['OL24638A', 'olid', 'book'],
     ['OL7353617M', 'olid', 'author'],
     ['OL7353617', 'olid', 'book'],
-  ])('rejects %s as an identifier for id_type %s / target %s', (identifier, idType, target) => {
-    const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });
-    const input = openlibraryGetCoverUrl.input.parse({ identifier, id_type: idType, target });
-    expect(caught(() => openlibraryGetCoverUrl.handler(input, ctx))).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'invalid_identifier',
-        recovery: {
-          hint: openlibraryGetCoverUrl.errors!.find((e) => e.reason === 'invalid_identifier')!
-            .recovery,
+  ] as const)(
+    'rejects %s as an identifier for id_type %s / target %s',
+    async (identifier, idType, target) => {
+      const result = await runToolContract(openlibraryGetCoverUrl, {
+        identifier,
+        id_type: idType,
+        target,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'invalid_identifier',
+            recovery: {
+              hint: openlibraryGetCoverUrl.errors!.find((e) => e.reason === 'invalid_identifier')!
+                .recovery,
+            },
+          },
         },
-      },
-    });
-  });
+      });
+    },
+  );
 
   it('names the shape the identifier was expected to have', () => {
     const ctx = createMockContext({ errors: openlibraryGetCoverUrl.errors });

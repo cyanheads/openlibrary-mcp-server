@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEditions } from '@/mcp-server/tools/definitions/openlibrary-get-editions.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -63,21 +63,23 @@ describe('openlibraryGetEditions', () => {
     expect(spy).toHaveBeenCalledWith('/works/OL45804W', 10, 0, ctx);
   });
 
-  it('throws not_found via ctx.fail when service returns null', async () => {
-    const ctx = createMockContext({ errors: openlibraryGetEditions.errors });
+  it('fails as not_found when service returns null', async () => {
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
     vi.spyOn(svc, 'getEditions').mockResolvedValueOnce(null);
 
-    const input = openlibraryGetEditions.input.parse({ work_id: 'OL999999999W' });
-    await expect(openlibraryGetEditions.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'not_found',
-        // The declared hint must reach the wire, not just live in errors[].
-        recovery: {
-          hint: openlibraryGetEditions.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL999999999W' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          // The declared hint must reach the wire, not just live in errors[].
+          recovery: {
+            hint: openlibraryGetEditions.errors!.find((e) => e.reason === 'not_found')!.recovery,
+          },
         },
       },
     });

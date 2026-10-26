@@ -78,6 +78,156 @@ function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, ...init });
 }
 
+describe('book search validation classification', () => {
+  it('preserves cancellation while a book search is in flight', async () => {
+    vi.useFakeTimers();
+    serve((_url, init) => hang(init));
+    const controller = new AbortController();
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'dune', limit: 1, offset: 0 },
+        createMockContext({ signal: controller.signal }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    await call.done;
+    expect(call.state.error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(call.state.error).not.toHaveProperty('data.reason', 'invalid_search_query');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a 429 then classifies the subsequent 422 without a third request', async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
+    serve(() =>
+      Promise.resolve(
+        ++attempt === 1
+          ? json({}, { status: 429, headers: { 'Retry-After': '1' } })
+          : json({ detail: [{ msg: 'Invalid search' }] }, { status: 422 }),
+      ),
+    );
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'ab', limit: 1, offset: 0 },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    await call.done;
+    expect(call.state.error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_search_query', validation_messages: ['Invalid search'] },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['ab', '頭痛', ' '])(
+    'classifies actual 422 for query %j without mutation or retry',
+    async (query) => {
+      serve(() =>
+        Promise.resolve(
+          json(
+            {
+              detail: [
+                {
+                  loc: ['query', 'q'],
+                  msg: 'Query must contain at least 3 characters',
+                  type: 'value_error',
+                  input: 'PRIVATE_INPUT',
+                },
+              ],
+              secret: 'PRIVATE_BODY',
+            },
+            { status: 422 },
+          ),
+        ),
+      );
+      await expect(
+        getOpenLibraryService().searchBooks(
+          { query, title: 'Specific title', limit: 1, offset: 0 },
+          createMockContext(),
+        ),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_search_query',
+          status: 422,
+          validation_messages: ['Query must contain at least 3 characters'],
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(new URL(requestUrl(fetchSpy.mock.calls[0]?.[0])).searchParams.get('q')).toBe(query);
+    },
+  );
+
+  it.each([
+    'not json',
+    JSON.stringify({ detail: 'PRIVATE_BODY' }),
+    JSON.stringify({ detail: [{ msg: 123, input: 'PRIVATE_INPUT' }] }),
+  ])('uses a safe generic validation error for malformed 422 %j', async (body) => {
+    serve(() => Promise.resolve(new Response(body, { status: 422 })));
+    const error = await getOpenLibraryService()
+      .searchBooks({ query: 'ab', limit: 1, offset: 0 }, createMockContext())
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_search_query', status: 422 },
+    });
+    expect(JSON.stringify(error)).not.toContain('PRIVATE');
+    expect(error).not.toHaveProperty('data.body');
+    expect(error).not.toHaveProperty('data.responseBody');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a different validation message without copying arbitrary upstream detail fields', async () => {
+    serve(() =>
+      Promise.resolve(
+        json(
+          {
+            detail: [
+              {
+                msg: 'Invalid sort order',
+                type: 'value_error',
+                input: 'PRIVATE_INPUT',
+                extra: 'PRIVATE_BODY',
+              },
+            ],
+          },
+          { status: 422 },
+        ),
+      ),
+    );
+    const error = await getOpenLibraryService()
+      .searchBooks({ query: 'dune', limit: 1, offset: 0 }, createMockContext())
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({ data: { validation_messages: ['Invalid sort order'] } });
+    expect(JSON.stringify(error)).not.toContain('PRIVATE');
+    expect(error).not.toHaveProperty('data.body');
+  });
+
+  it('does not classify another endpoint’s 422 as a book search error', async () => {
+    serve(() => Promise.resolve(json({ detail: [{ msg: 'Invalid author' }] }, { status: 422 })));
+    const error = await getOpenLibraryService()
+      .getAuthor('OL1A', createMockContext())
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({ data: { status: 422 } });
+    expect(error).not.toHaveProperty('data.reason', 'invalid_search_query');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not classify another book search status as query validation', async () => {
+    serve(() => Promise.resolve(json({ detail: [{ msg: 'Invalid query' }] }, { status: 400 })));
+    const error = await getOpenLibraryService()
+      .searchBooks({ query: 'dune', limit: 1, offset: 0 }, createMockContext())
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({ data: { status: 400 } });
+    expect(error).not.toHaveProperty('data.reason', 'invalid_search_query');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 function haproxy(status: number): Response {
   return new Response(HAPROXY_503_PAGE, {
     status,
@@ -852,7 +1002,10 @@ describe('merged author resolution — one deadline per call', () => {
         Promise.resolve(
           openlibraryAuthorResource.handler(
             openlibraryAuthorResource.params!.parse({ author_id: 'OL100A' }),
-            createMockContext({ uri: new URL('openlibrary://authors/OL100A') }),
+            createMockContext({
+              uri: new URL('openlibrary://authors/OL100A'),
+              errors: openlibraryAuthorResource.errors,
+            }),
           ),
         ),
     ],

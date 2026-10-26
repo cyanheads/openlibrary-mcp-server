@@ -5,25 +5,16 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
+import {
+  applyPaginationLimit,
+  composeNotices,
+  paginationLimit,
+  paginationLimitNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import { normalizeLanguageCode } from '@/services/open-library/language-codes.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
-
-/**
- * Max Internet Archive identifiers rendered per work in the `content[]` text.
- * `structuredContent` always carries the complete `ia_identifiers` array; only
- * the human-facing text is capped, with the omitted count disclosed via the
- * enrichment trailer.
- */
-const IA_TEXT_CAP = 5;
-
-/**
- * Max subject tags rendered per work in the `content[]` text. Same contract as
- * {@link IA_TEXT_CAP} — `structuredContent` carries every tag the search
- * returned, and the trailer names how many the text omits.
- */
-const SUBJECTS_TEXT_CAP = 5;
 
 /** Text label for each availability flag, in the order `format()` renders them. */
 const AVAILABILITY_FLAG_LABELS = [
@@ -78,15 +69,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .describe(
         'Sort order. "relevance" uses Solr scoring. "new"/"old" sort by first publish year. "rating" by average community rating. "editions" by edition count.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(10)
-      .describe(
-        'Max results to return. Higher values increase response size; prefer 10–20 for exploration.',
-      ),
+    limit: paginationLimit(10).describe(
+      'Max results to return. Higher values increase response size; prefer 10–20 for exploration.',
+    ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
     include_availability: z
       .boolean()
@@ -117,6 +102,33 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
               .optional()
               .describe('Year of first publication. Absent when unknown.'),
             edition_count: z.number().describe('Total editions catalogued for this work.'),
+            matching_edition: z
+              .object({
+                edition_id: z
+                  .string()
+                  .describe(
+                    'Provider-selected edition OLID (OL…M). Pass to openlibrary_get_edition with id_type "olid".',
+                  ),
+                title: z.string().optional().describe('Selected edition title, when supplied.'),
+                languages: z
+                  .array(z.string())
+                  .optional()
+                  .describe('Selected edition language codes, when supplied.'),
+                publishers: z
+                  .array(z.string())
+                  .optional()
+                  .describe('Selected edition publisher names, when supplied.'),
+              })
+              .optional()
+              .describe(
+                'One provider-ranked edition selected by query syntax and field filters, when supplied. Unfielded terms need not all match this edition; this is not every edition record.',
+              ),
+            matching_edition_count: z
+              .number()
+              .optional()
+              .describe(
+                'Provider-reported matching-edition count for this search, when supplied. Distinct from the work total edition_count; may be present without a selected edition.',
+              ),
             cover_id: z
               .number()
               .optional()
@@ -127,7 +139,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
               .array(z.string())
               .optional()
               .describe(
-                "Every subject tag the search index returned for this work. The text output caps the rendered list; this array is complete. Absent when no subjects are tagged. For the work record's own curated subject lists (places, times, people), use openlibrary_get_work.",
+                "Every subject tag the search index returned for this work. Absent when no subjects are tagged. For the work record's own curated subject lists (places, times, people), use openlibrary_get_work.",
               ),
             ebook_access: z
               .enum(['no_ebook', 'unclassified', 'printdisabled', 'borrowable', 'public'])
@@ -202,6 +214,14 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   }),
   errors: [
     {
+      reason: 'invalid_search_query',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Open Library rejects the search query with HTTP 422.',
+      recovery:
+        'Use a longer general query or supply a specific title or author filter, then retry.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_language_code',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A 2-letter language value has no MARC equivalent, so no filter could be applied.',
@@ -231,7 +251,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .string()
       .optional()
       .describe(
-        'Guidance when the page is empty (how to broaden a query that matched nothing, or which offset to retry when offset ran past the end) or when the text output capped a per-work list. Absent when neither applies.',
+        'Guidance when the page is empty or a requested page limit was reduced to 100. Absent when neither applies.',
       ),
   },
 
@@ -246,7 +266,8 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     });
 
     const svc = getOpenLibraryService();
-    const result = await svc.searchBooks(input, ctx);
+    const limit = applyPaginationLimit(input.limit, 'openlibrary_search_books', ctx);
+    const result = await svc.searchBooks({ ...input, limit }, ctx);
 
     // Build queryEcho from active filters for agent context
     const filters: string[] = [];
@@ -270,40 +291,25 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     // request matched works, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
+    const clampNotice = paginationLimitNotice(input.limit, result.offset, result.works.length);
+    let notice = clampNotice;
     if (result.works.length === 0) {
       if (result.total > 0) {
-        ctx.enrich.notice(
+        notice = composeNotices(
           `Offset ${result.offset} is past the end of the result set — ${result.total} works matched, so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the search criteria themselves matched.`,
+          clampNotice,
         );
       } else {
-        ctx.enrich.notice(
+        notice = composeNotices(
           filters.length
-            ? `No works matched ${filters.join(', ')}. Try broader or different terms.`
+            ? `No works matched ${escapeMarkdownInline(filters.join(', '))}. Try broader or different terms.`
             : 'No works matched your search. Try different filters or a general query.',
+          clampNotice,
         );
       }
-      return { total: result.total, offset: result.offset, works: [] };
     }
 
-    // Disclose what format() caps out of the text; structuredContent keeps every
-    // entry. `notice` is last-wins, so both caps ship as one composed string.
-    const capNotices = [
-      cappedListNotice(
-        result.works.map((work) => work.ia_identifiers.length),
-        IA_TEXT_CAP,
-        {
-          label: 'Internet Archive identifiers',
-          unit: 'work',
-          path: 'works[].ia_identifiers',
-        },
-      ),
-      cappedListNotice(
-        result.works.map((work) => work.subjects?.length ?? 0),
-        SUBJECTS_TEXT_CAP,
-        { label: 'Subjects', unit: 'work', path: 'works[].subjects' },
-      ),
-    ].filter((notice): notice is string => notice !== undefined);
-    if (capNotices.length) ctx.enrich.notice(capNotices.join(' '));
+    if (notice) ctx.enrich.notice(notice);
 
     return { total: result.total, offset: result.offset, works: result.works };
   },
@@ -316,35 +322,60 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
 
     for (const work of result.works) {
       lines.push('');
-      lines.push(`## ${work.title || NO_TITLE}`);
-      lines.push(`**Work ID:** ${work.work_id}`);
-      if (work.author_names.length) {
-        lines.push(
-          `**Authors:** ${work.author_names.join(', ')} (IDs: ${work.author_ids.join(', ')})`,
-        );
+      lines.push(
+        work.title.includes('\n') || work.title.includes('\r')
+          ? `**Title:** ${escapeMarkdownInline(work.title)}`
+          : `## ${work.title ? escapeMarkdownInline(work.title) : NO_TITLE}`,
+      );
+      if (work.title === '') lines.push('**Title:** ""');
+      lines.push(`**Work ID:** ${escapeMarkdownInline(work.work_id)}`);
+      if (work.matching_edition_count !== undefined)
+        lines.push(`**Matching editions (provider count):** ${work.matching_edition_count}`);
+      if (work.matching_edition) {
+        const edition = work.matching_edition;
+        lines.push(`**Selected edition ID:** ${escapeMarkdownInline(edition.edition_id)}`);
+        if (edition.title !== undefined)
+          lines.push(`**Selected edition title:** ${escapeMarkdownInline(edition.title)}`);
+        if (edition.languages !== undefined)
+          lines.push(
+            `**Selected edition languages:** ${edition.languages.length ? edition.languages.map(escapeMarkdownInline).join(', ') : '[]'}`,
+          );
+        if (edition.publishers !== undefined)
+          lines.push(
+            `**Selected edition publishers:** ${edition.publishers.length ? edition.publishers.map(escapeMarkdownInline).join(', ') : '[]'}`,
+          );
       }
+      lines.push(
+        `**Authors:** ${work.author_names.length ? work.author_names.map(escapeMarkdownInline).join(', ') : '[]'}`,
+      );
+      lines.push(
+        `**Author IDs:** ${work.author_ids.length ? work.author_ids.map(escapeMarkdownInline).join(', ') : '[]'}`,
+      );
       const meta: string[] = [];
       if (work.first_publish_year != null) meta.push(`First published: ${work.first_publish_year}`);
       meta.push(`Editions: ${work.edition_count}`);
       meta.push(`E-book: ${work.ebook_access}`);
-      if (work.has_fulltext) meta.push('Has full text');
-      if (work.ratings_average != null) meta.push(`Rating: ${work.ratings_average.toFixed(1)}`);
+      meta.push(`Has full text: ${work.has_fulltext}`);
+      if (work.ratings_average != null) meta.push(`Rating: ${work.ratings_average}`);
       lines.push(meta.join(' | '));
       if (work.cover_id != null) lines.push(`**Cover ID:** ${work.cover_id}`);
-      if (work.subjects?.length) {
-        lines.push(`**Subjects:** ${work.subjects.slice(0, SUBJECTS_TEXT_CAP).join(', ')}`);
+      if (work.subjects !== undefined) {
+        lines.push(
+          `**Subjects:** ${work.subjects.length ? work.subjects.map(escapeMarkdownInline).join(', ') : '[]'}`,
+        );
       }
-      if (work.ia_identifiers.length) {
-        lines.push(`**IA:** ${work.ia_identifiers.slice(0, IA_TEXT_CAP).join(', ')}`);
-      }
+      lines.push(
+        `**IA:** ${work.ia_identifiers.length ? work.ia_identifiers.map(escapeMarkdownInline).join(', ') : '[]'}`,
+      );
       if (work.availability != null) {
         const av = work.availability;
-        const avParts = [`Status: ${av.status}`];
+        const avParts = [`Status: ${escapeMarkdownInline(av.status)}`];
         for (const [flag, label] of AVAILABILITY_FLAG_LABELS) {
           // An absent flag is unknown, so it is left out rather than rendered as false.
           if (av[flag] !== undefined) avParts.push(`${label}: ${av[flag]}`);
         }
-        if (av.openlibrary_edition) avParts.push(`Edition: ${av.openlibrary_edition}`);
+        if (av.openlibrary_edition !== undefined)
+          avParts.push(`Edition: ${escapeMarkdownInline(av.openlibrary_edition)}`);
         lines.push(`**Availability:** ${avParts.join(' | ')}`);
       } else if (work.availability === null) {
         lines.push('**Availability:** No availability returned by Open Library.');

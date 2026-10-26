@@ -5,7 +5,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
+import {
+  applyPaginationLimit,
+  composeNotices,
+  paginationLimit,
+  paginationLimitNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import { WORK_ID_MESSAGE, WORK_ID_PATTERN } from '@/mcp-server/tools/work-id.js';
 import {
   getOpenLibraryService,
@@ -24,13 +31,9 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       .describe(
         'Open Library Work ID. Format: OL…W (e.g., "OL45804W"), optionally prefixed "/works/". Not an ISBN — resolve an ISBN to its work with openlibrary_get_edition (id_type "isbn").',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(10)
-      .describe('Max editions to return. Prefer 10–20 for exploration.'),
+    limit: paginationLimit(10).describe(
+      'Max editions to return; values above 100 apply 100 when limit clamping is enabled. Prefer 10–20 for exploration.',
+    ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
   output: z.object({
@@ -64,6 +67,18 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
                 'Publication date string (e.g., "2003", "January 2003"). Absent when not recorded.',
               ),
             publishers: z.array(z.string()).describe('Publisher names.'),
+            physical_format: z
+              .string()
+              .optional()
+              .describe(
+                'Cataloged physical format or binding, preserved verbatim. Absent when not recorded.',
+              ),
+            edition_name: z
+              .string()
+              .optional()
+              .describe(
+                'Cataloged edition or printing statement, preserved verbatim. Absent when not recorded.',
+              ),
             languages: z
               .array(z.string())
               .describe('3-letter ISO language codes (e.g., "eng", "fre").'),
@@ -87,7 +102,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     notice: z
       .string()
       .optional()
-      .describe('Set when the requested work ID was merged into a different canonical ID.'),
+      .describe('Guidance for a merged work ID or a requested limit above the page ceiling.'),
   },
   errors: [
     {
@@ -106,7 +121,8 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       offset: input.offset,
     });
     const svc = getOpenLibraryService();
-    const result = await svc.getEditions(input.work_id, input.limit, input.offset, ctx);
+    const limit = applyPaginationLimit(input.limit, 'openlibrary_get_editions', ctx);
+    const result = await svc.getEditions(input.work_id, limit, input.offset, ctx);
     if (!result) {
       throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
     }
@@ -114,35 +130,50 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     // format() never sees the request, so a merged-ID substitution is disclosed
     // here, and only when the IDs differ.
     const requested = normalizeWorkId(input.work_id);
-    if (result.work_id !== requested) {
-      ctx.enrich.notice(
-        `${requested} is a merged record; these are the editions of ${result.work_id}. Use ${result.work_id} for further lookups.`,
-      );
-    }
+    const notice = composeNotices(
+      result.work_id !== requested
+        ? `${escapeMarkdownInline(requested)} is a merged record; these are the editions of ${escapeMarkdownInline(result.work_id)}. Use ${escapeMarkdownInline(result.work_id)} for further lookups.`
+        : undefined,
+      paginationLimitNotice(input.limit, input.offset, result.editions.length),
+    );
+    if (notice) ctx.enrich.notice(notice);
     // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
     return { ...result, offset: input.offset };
   },
 
   format: (result) => {
+    const literal = (value: string) => (value === '' ? '""' : escapeMarkdownInline(value));
+    const list = (values: string[]) => (values.length ? values.map(literal).join(', ') : '[]');
     const lines: string[] = [];
     lines.push(
-      `**Work ID:** ${result.work_id} | **Total editions:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.editions.length}`,
+      `**Work ID:** ${escapeMarkdownInline(result.work_id)} | **Total editions:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.editions.length}`,
     );
 
     for (const ed of result.editions) {
       lines.push('');
-      lines.push(`### ${ed.title || NO_TITLE}`);
-      lines.push(`**Edition ID:** ${ed.edition_id}`);
+      if (ed.title.includes('\n') || ed.title.includes('\r')) {
+        lines.push('### Edition', '', `**Title:** ${escapeMarkdownInline(ed.title)}`);
+      } else {
+        lines.push(`### ${ed.title === '' ? NO_TITLE : escapeMarkdownInline(ed.title)}`);
+        if (ed.title === '') lines.push('**Title:** ""');
+      }
+      lines.push(`**Edition ID:** ${escapeMarkdownInline(ed.edition_id)}`);
       const meta: string[] = [];
-      if (ed.publish_date) meta.push(`Published: ${ed.publish_date}`);
-      if (ed.publishers.length) meta.push(`Publisher: ${ed.publishers.join(', ')}`);
-      if (ed.languages.length) meta.push(`Language: ${ed.languages.join(', ')}`);
+      if (ed.publish_date !== undefined) meta.push(`Published: ${literal(ed.publish_date)}`);
+      if (ed.publishers.length) meta.push(`Publisher: ${list(ed.publishers)}`);
+      else lines.push('**Publisher:** []');
+      if (ed.languages.length) meta.push(`Language: ${list(ed.languages)}`);
+      else lines.push('**Language:** []');
       if (ed.page_count != null) meta.push(`Pages: ${ed.page_count}`);
       if (meta.length) lines.push(meta.join(' | '));
-      if (ed.isbn_13.length) lines.push(`**ISBN-13:** ${ed.isbn_13.join(', ')}`);
-      if (ed.isbn_10.length) lines.push(`**ISBN-10:** ${ed.isbn_10.join(', ')}`);
-      if (ed.cover_ids.length) lines.push(`**Cover IDs:** ${ed.cover_ids.join(', ')}`);
-      if (ed.work_id) lines.push(`**Work ID:** ${ed.work_id}`);
+      if (ed.physical_format !== undefined)
+        lines.push(`**Physical format:** ${literal(ed.physical_format)}`);
+      if (ed.edition_name !== undefined)
+        lines.push(`**Edition statement:** ${literal(ed.edition_name)}`);
+      lines.push(`**ISBN-13:** ${list(ed.isbn_13)}`);
+      lines.push(`**ISBN-10:** ${list(ed.isbn_10)}`);
+      lines.push(`**Cover IDs:** ${ed.cover_ids.length ? ed.cover_ids.join(', ') : '[]'}`);
+      if (ed.work_id !== undefined) lines.push(`**Work ID:** ${literal(ed.work_id)}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

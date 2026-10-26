@@ -4,9 +4,15 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { config, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
+  clampLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Apply page and identifier batch ceilings instead of rejecting an oversized request.',
+    ),
   userAgent: z
     .string()
     .default('openlibrary-mcp-server casey@caseyjhand.com')
@@ -17,8 +23,12 @@ const ServerConfigSchema = z.object({
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 
+/** Resolve operator settings after framework dotenv loading, before tool schemas are built. */
 export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
+  // Tool schemas are constructed on import; load the framework's .env before fixing their limits.
+  void config.environment;
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    clampLimits: 'OPENLIBRARY_CLAMP_LIMITS',
     userAgent: 'OPENLIBRARY_USER_AGENT',
   });
   return _config;

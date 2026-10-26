@@ -4,11 +4,117 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryAuthorResource } from '@/mcp-server/resources/definitions/openlibrary-author.resource.js';
 import { openlibraryWorkResource } from '@/mcp-server/resources/definitions/openlibrary-work.resource.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { createResourceHandler } from '../../node_modules/@cyanheads/mcp-ts-core/dist/mcp-server/resources/utils/resourceHandlerFactory.js';
+import { logger } from '../../node_modules/@cyanheads/mcp-ts-core/dist/utils/internal/logger.js';
+
+type ResourceRequestContext = Parameters<ReturnType<typeof createResourceHandler>>[2];
+
+/** SDK request scope supplied to the production resource factory. */
+function resourceRequest(): ResourceRequestContext {
+  return {
+    mcpReq: {
+      id: 1,
+      method: 'resources/read',
+      signal: new AbortController().signal,
+      requestState: () => undefined,
+      send: async () => {
+        throw new Error('Unexpected outbound SDK request');
+      },
+      notify: vi.fn<ResourceRequestContext['mcpReq']['notify']>().mockResolvedValue(undefined),
+      log: vi.fn<ResourceRequestContext['mcpReq']['log']>().mockResolvedValue(undefined),
+      elicitInput: vi.fn<ResourceRequestContext['mcpReq']['elicitInput']>(),
+      requestSampling: vi.fn<ResourceRequestContext['mcpReq']['requestSampling']>(),
+    },
+  };
+}
+
+describe('resource factory contracts', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+    vi.restoreAllMocks();
+  });
+
+  it.each(['', '/authors/'])(
+    'rejects an empty author identifier %j without returning a different author',
+    async (authorId) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(Response.json({ key: '/authors/OL1A', name: 'Unrelated author' }));
+      const handler = createResourceHandler(
+        openlibraryAuthorResource,
+        { logger, storage: createInMemoryStorage() },
+        {},
+      );
+      await expect(
+        handler(new URL('openlibrary://authors/'), { author_id: authorId }, resourceRequest()),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          recovery: { hint: expect.stringContaining('openlibrary_search_authors') },
+          requestId: expect.any(String),
+        },
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['works', openlibraryWorkResource, 'Work OL999W not found on Open Library.'],
+    ['authors', openlibraryAuthorResource, 'Author OL999A not found on Open Library.'],
+  ] as const)(
+    'preserves %s missing-record code and message through the factory',
+    async (kind, definition, message) => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 404 }));
+      const handler = createResourceHandler(
+        definition,
+        { logger, storage: createInMemoryStorage() },
+        {},
+      );
+      const id = kind === 'works' ? 'OL999W' : 'OL999A';
+      const variables = kind === 'works' ? { work_id: id } : { author_id: id };
+      await expect(
+        handler(new URL(`openlibrary://${kind}/${id}`), variables, resourceRequest()),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message,
+        data: { requestId: expect.any(String) },
+      });
+    },
+  );
+
+  it.each([
+    ['works', openlibraryWorkResource, 'openlibrary_search_books'],
+    ['authors', openlibraryAuthorResource, 'openlibrary_search_authors'],
+  ] as const)(
+    'supplies %s not_found reason and recovery through the resource factory',
+    async (kind, definition, searchTool) => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 404 }));
+      const handler = createResourceHandler(
+        definition,
+        { logger, storage: createInMemoryStorage() },
+        {},
+      );
+      const id = kind === 'works' ? 'OL999W' : 'OL999A';
+      const variables = kind === 'works' ? { work_id: id } : { author_id: id };
+      await expect(
+        handler(new URL(`openlibrary://${kind}/${id}`), variables, resourceRequest()),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          recovery: { hint: expect.stringContaining(searchTool) },
+          requestId: expect.any(String),
+        },
+      });
+    },
+  );
+});
 
 describe('openlibraryAuthorResource — edge cases', () => {
   beforeEach(() => {
@@ -16,7 +122,10 @@ describe('openlibraryAuthorResource — edge cases', () => {
   });
 
   it('propagates service unavailable error', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -31,7 +140,10 @@ describe('openlibraryAuthorResource — edge cases', () => {
   });
 
   it('handles author with all optional fields absent', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -50,7 +162,10 @@ describe('openlibraryAuthorResource — edge cases', () => {
   });
 
   it('passes author_id to service unchanged', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -67,7 +182,10 @@ describe('openlibraryAuthorResource — edge cases', () => {
   });
 
   it('propagates McpError as-is from service', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -90,7 +208,10 @@ describe('openlibraryWorkResource — edge cases', () => {
   });
 
   it('propagates service unavailable error', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -105,7 +226,10 @@ describe('openlibraryWorkResource — edge cases', () => {
   });
 
   it('handles sparse work with no optional fields', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -127,7 +251,10 @@ describe('openlibraryWorkResource — edge cases', () => {
   });
 
   it('passes work_id to service unchanged', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -148,7 +275,10 @@ describe('openlibraryWorkResource — edge cases', () => {
   });
 
   it('propagates McpError as-is from service', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

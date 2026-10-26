@@ -1,10 +1,8 @@
 /**
  * @fileoverview Regression tests for #28 — records Open Library holds with no
  * title (or no name) must not render as a bare markdown heading in `content[]`.
- * One block per tool whose `format()` puts a coalesced-to-empty field in a
- * heading; each asserts the placeholder replaces it, no heading line is left
- * bare, the record identifier still anchors the entry, and a populated value is
- * rendered unchanged.
+ * Empty values remain visible through a placeholder heading or a labeled field;
+ * no heading is left bare, identifiers anchor entries, and populated values remain intact.
  * @module tests/tools/empty-heading-placeholders.tool.test
  */
 
@@ -17,7 +15,7 @@ import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrar
 import { openlibraryGetWork } from '@/mcp-server/tools/definitions/openlibrary-get-work.tool.js';
 import { openlibrarySearchAuthors } from '@/mcp-server/tools/definitions/openlibrary-search-authors.tool.js';
 import { openlibrarySearchBooks } from '@/mcp-server/tools/definitions/openlibrary-search-books.tool.js';
-import { NO_NAME, NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
+import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 
 /** A heading marker with nothing after it — the #28 symptom. */
 const BARE_HEADING = /^#{1,6}[ \t]*$/m;
@@ -64,9 +62,10 @@ describe('openlibraryGetAuthorWorks format — empty title', () => {
     works: [{ work_id: 'OL45822402W', title: '', cover_ids: [] }],
   };
 
-  it('renders the placeholder instead of a bare heading', () => {
+  it('labels the empty title without a bare heading', () => {
     const text = render(openlibraryGetAuthorWorks.format!(result));
-    expect(text).toContain(`### ${NO_TITLE}`);
+    expect(text).toContain('### Work');
+    expect(text).toMatch(/\*\*Title:\*\* *(?:\n|$)/);
     expect(text).not.toMatch(BARE_HEADING);
     expect(text).toContain('**Work ID:** OL45822402W');
   });
@@ -78,7 +77,7 @@ describe('openlibraryGetAuthorWorks format — empty title', () => {
         works: [{ ...result.works[0]!, title: 'Tender Is the Night' }],
       }),
     );
-    expect(text).toContain('### Tender Is the Night');
+    expect(text).toContain('**Title:** Tender Is the Night');
     expect(text).not.toContain(NO_TITLE);
   });
 });
@@ -96,7 +95,7 @@ describe('openlibraryGetEdition format — empty title', () => {
     lc_classifications: [],
     cover_ids: [],
   };
-  const result = { editions: [edition], unresolved: [] };
+  const result = { editions: [edition], unresolved: [], unprocessed: [] };
 
   it('renders the placeholder instead of a bare heading', () => {
     const text = render(openlibraryGetEdition.format!(result));
@@ -222,17 +221,17 @@ describe('openlibrarySearchBooks format — empty title', () => {
 describe('openlibraryGetAuthor format — empty name', () => {
   const result = { author_id: 'OL24638A', name: '', photo_ids: [], remote_ids: {} };
 
-  it('renders the placeholder instead of a bare heading', () => {
+  it('labels the empty name without a bare heading', () => {
     const text = render(openlibraryGetAuthor.format!(result));
-    expect(text).toContain(`## ${NO_NAME}`);
+    expect(text).toContain('## Author');
+    expect(text).toContain('**Name:** ""');
     expect(text).not.toMatch(BARE_HEADING);
     expect(text).toContain('**Author ID:** OL24638A');
   });
 
   it('renders a populated name unchanged', () => {
     const text = render(openlibraryGetAuthor.format!({ ...result, name: 'F. Scott Fitzgerald' }));
-    expect(text).toContain('## F. Scott Fitzgerald');
-    expect(text).not.toContain(NO_NAME);
+    expect(text).toContain('**Name:** F. Scott Fitzgerald');
   });
 });
 
@@ -251,9 +250,10 @@ describe('openlibrarySearchAuthors format — empty name', () => {
     ],
   };
 
-  it('renders the placeholder instead of a bare heading', () => {
+  it('labels the empty name without a bare heading', () => {
     const text = render(openlibrarySearchAuthors.format!(result));
-    expect(text).toContain(`## ${NO_NAME}`);
+    expect(text).toContain('## Author');
+    expect(text).toMatch(/\*\*Name:\*\* *(?:\n|$)/);
     expect(text).not.toMatch(BARE_HEADING);
     expect(text).toContain('**Author ID:** OL24638A');
   });
@@ -265,7 +265,6 @@ describe('openlibrarySearchAuthors format — empty name', () => {
         authors: [{ ...result.authors[0]!, name: 'F. Scott Fitzgerald' }],
       }),
     );
-    expect(text).toContain('## F. Scott Fitzgerald');
-    expect(text).not.toContain(NO_NAME);
+    expect(text).toContain('**Name:** F. Scott Fitzgerald');
   });
 });

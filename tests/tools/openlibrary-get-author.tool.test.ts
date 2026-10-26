@@ -145,4 +145,50 @@ describe('openlibraryGetAuthor', () => {
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
   });
+
+  it('preserves literal multiline author data on both response surfaces', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const author = {
+      ...FULL_AUTHOR,
+      name: '*Name*\n- continued',
+      personal_name: '',
+      fuller_name: '[Full](https://example.com)',
+      bio: '<b>Biography</b>\n# literal heading',
+      birth_date: '',
+      death_date: '',
+      photo_ids: [0, 42],
+      remote_ids: { wikidata: '', viaf: '*remote*' },
+    };
+    vi.spyOn(svc, 'getAuthor').mockResolvedValueOnce(author);
+    const result = await runToolContract(openlibraryGetAuthor, { author_id: 'OL24638A' });
+    expect(result.structuredContent).toMatchObject(author);
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('**Name:** \\*Name\\*\\\n\\- continued');
+    expect(text).toContain('**Personal name:** ""');
+    expect(text).toContain('Born: ""');
+    expect(text).toContain('Died: ""');
+    expect(text).toContain('\\<b>Biography\\</b>\\\n\\# literal heading');
+    expect(text).toContain('**Photo IDs:** 0, 42');
+    expect(text).toContain('wikidata: ""');
+    expect(text).toContain('viaf: \\*remote\\*');
+  });
+
+  it('distinguishes a present empty name from absent optional fields', () => {
+    const text = openlibraryGetAuthor.format!({
+      author_id: 'OL1A',
+      name: '',
+      photo_ids: [],
+      remote_ids: {},
+    })
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('**Name:** ""');
+    expect(text).not.toContain('Personal name');
+  });
 });

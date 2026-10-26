@@ -57,6 +57,43 @@ const RICH_MATCH = {
 };
 
 describe('openlibrarySearchInside', () => {
+  it('clamps before fetching and preserves an over-paged notice on both surfaces', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(insideResponse([], 52));
+    const result = await runToolContract(openlibrarySearchInside, {
+      query: 'dune',
+      limit: 101,
+      offset: 100,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('limit=100');
+    expect(result.structuredContent).toMatchObject({ total: 52, offset: 100, matches: [] });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('Requested limit 101; applied limit 100. Next offset: 100.');
+    expect(notice).toContain('past the end');
+    expect(
+      result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'),
+    ).toContain(notice);
+  });
+  it('renders every literal snippet and the exact score', () => {
+    const result = {
+      total: 1,
+      offset: 0,
+      matches: [
+        {
+          ia_identifier: 'item',
+          title: '',
+          creator: '',
+          score: 1.234567,
+          snippets: ['a', 'b', 'c', '*last*\n# next'],
+        },
+      ],
+    };
+    const text = (openlibrarySearchInside.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('1.234567');
+    expect(text).toContain('\\*last\\*\\\n\\# next');
+    expect(text).toContain('**Title:** ');
+  });
   beforeEach(() => {
     initOpenLibraryService();
     // The suite never reaches openlibrary.org: a request no test routed fails loudly.
@@ -204,9 +241,9 @@ describe('openlibrarySearchInside', () => {
     expect(input.offset).toBe(0);
   });
 
-  // ─── Snippet cap disclosure ─────────────────────────────────────────────────
+  // ─── Complete snippet rendering ─────────────────────────────────────────────
 
-  it('caps rendered snippets at 3 while structuredContent keeps them all', async () => {
+  it('renders all snippets returned in structuredContent', async () => {
     const manySnippets = ['one', 'two', 'three', 'four', 'five'];
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       insideResponse([{ identifier: 'item1', meta_title: 'A Book', text: manySnippets }]),
@@ -220,12 +257,13 @@ describe('openlibrarySearchInside', () => {
 
     expect(result.matches[0]?.snippets).toEqual(manySnippets);
     const text = (openlibrarySearchInside.format!(result)[0] as { text: string }).text;
-    expect(text).toContain('> one');
-    expect(text).toContain('> three');
-    expect(text).not.toContain('> four');
+    expect(text).toContain('**Passage:** one');
+    expect(text).toContain('**Passage:** three');
+    expect(text).toContain('**Passage:** four');
+    expect(text).toContain('**Passage:** five');
   });
 
-  it('discloses the snippet cap in the enrichment notice', async () => {
+  it('adds no obsolete snippet cap notice', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       insideResponse([
         { identifier: 'item1', meta_title: 'A Book', text: ['one', 'two', 'three', 'four'] },
@@ -240,8 +278,7 @@ describe('openlibrarySearchInside', () => {
 
     await openlibrarySearchInside.handler(openlibrarySearchInside.input.parse({ query: 'x' }), ctx);
 
-    expect(notices.join(' ')).toContain('Snippets are capped at 3');
-    expect(notices.join(' ')).toContain('matches[].snippets');
+    expect(notices).toEqual([]);
   });
 
   it('adds no cap notice when every snippet is rendered', async () => {
@@ -276,21 +313,23 @@ describe('openlibrarySearchInside', () => {
     expect(text).toContain('Raptors of paradise');
     expect(text).toContain('Burridge, Jay, author');
     expect(text).toContain('30.28');
-    expect(text).toContain('~ the spice must flow ~');
+    expect(text).toContain('\\~ the spice must flow \\~');
   });
 
-  it('renders a missing creator as unknown rather than inventing one', () => {
+  it('omits absent title and creator and explicitly renders empty snippets', () => {
     const text = (
       openlibrarySearchInside.format!({
         total: 1,
         offset: 0,
-        matches: [{ ia_identifier: 'sparseitem', snippets: ['a passage'], score: 1.5 }],
+        matches: [{ ia_identifier: 'sparseitem', snippets: [], score: 1.5 }],
       })[0] as { text: string }
     ).text;
 
-    expect(text).toContain('**Creator:** Not available');
-    // With no title, the identifier stands in as the heading.
-    expect(text).toContain('## sparseitem');
+    expect(text).not.toContain('**Creator:**');
+    expect(text).not.toContain('**Title:**');
+    expect(text).toContain('**Snippets:** []');
+    // A sparse item still carries its identifier.
+    expect(text).toContain('**IA identifier:** sparseitem');
     expect(text).not.toContain('undefined');
   });
 

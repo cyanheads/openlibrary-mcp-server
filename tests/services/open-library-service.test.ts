@@ -84,6 +84,226 @@ beforeEach(() => {
   vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
 });
 
+describe('OpenLibraryService — search filter compatibility', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['', undefined])('keeps a %s query omitted beside a title filter', async (query) => {
+    initOpenLibraryService();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ numFound: 0, start: 100, docs: [] })));
+    await expect(
+      getOpenLibraryService().searchBooks(
+        { query, title: 'Pride and Prejudice', limit: 100, offset: 100 },
+        createMockContext(),
+      ),
+    ).resolves.toEqual({ total: 0, offset: 100, works: [] });
+    const url = new URL(requestUrl(fetchSpy.mock.calls[0]?.[0]));
+    expect(url.searchParams.has('q')).toBe(false);
+    expect(url.searchParams.get('title')).toBe('Pride and Prejudice');
+    expect(url.searchParams.get('limit')).toBe('100');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenLibraryService — metadata and normalization', () => {
+  beforeEach(() => initOpenLibraryService());
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['', '/authors/'])(
+    'rejects empty normalized author %s before either lookup',
+    async (id) => {
+      const fetchSpy = mockFetchRoutes({
+        '/authors/.json': {
+          key: '/authors/',
+          type: { key: '/type/redirect' },
+          location: '/authors/OL1A',
+        },
+        '/authors/OL1A.json': {
+          key: '/authors/OL1A',
+          type: { key: '/type/author' },
+          name: 'Wrong author',
+        },
+        '/authors//works.json': { size: 1, entries: [{ key: '/works/OL1W', title: 'Wrong work' }] },
+      });
+      await expect(getOpenLibraryService().getAuthor(id, createMockContext())).resolves.toBeNull();
+      await expect(
+        getOpenLibraryService().getAuthorWorks(id, 10, 0, createMockContext()),
+      ).resolves.toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([' Science Fiction ', '\tScience   Fiction\n', ' 科学 小说 '])(
+    'trims subject %s before normalizing',
+    async (subject) => {
+      const fetchSpy = mockFetchRoutes({
+        '/subjects/': { name: 'subject', work_count: 0, works: [] },
+      });
+      const result = await getOpenLibraryService().getSubject(subject, 10, 20, createMockContext());
+      const key = subject.includes('科学') ? '科学_小说' : 'science_fiction';
+      expect(result.subject_key).toBe(key);
+      expect(decodeURIComponent(requestUrl(fetchSpy.mock.calls[0]?.[0]))).toContain(
+        `/subjects/${key}.json`,
+      );
+      expect(result.work_count).toBe(0);
+    },
+  );
+
+  it('preserves every language and independently optional physical fields in detail and list', async () => {
+    mockFetchRoutes({
+      '/api/books.json': {
+        'OLID:OL1M': {
+          details: {
+            key: '/books/OL1M',
+            languages: [{ key: '/languages/eng' }, { key: '/languages/chi' }],
+            physical_format: 'paperback',
+            edition_name: 'Second Dell printing',
+          },
+        },
+        'OLID:OL2M': {
+          details: {
+            key: '/books/OL2M',
+            languages: [{ key: '/languages/fre' }],
+            physical_format: null,
+            edition_name: 'First Edition.',
+          },
+        },
+        'OLID:OL3M': {
+          details: {
+            key: '/books/OL3M',
+            languages: [],
+            physical_format: 'Hard Cover',
+            edition_name: '',
+          },
+        },
+        'OLID:OL4M': { details: { key: '/books/OL4M', physical_format: '', edition_name: null } },
+      },
+      '/works/OL1W/editions.json': {
+        size: 4,
+        entries: [
+          {
+            key: '/books/OL1M',
+            physical_format: 'paperback',
+            edition_name: 'Second Dell printing',
+          },
+          { key: '/books/OL2M', physical_format: null, edition_name: 'First Edition.' },
+          { key: '/books/OL3M', physical_format: 'Hard Cover', edition_name: '' },
+          { key: '/books/OL4M' },
+        ],
+      },
+    });
+    const detail = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL1M', 'OL2M', 'OL3M', 'OL4M'],
+      'olid',
+      createMockContext(),
+    );
+    expect(detail.editions[0]).toMatchObject({
+      language: 'eng',
+      languages: ['eng', 'chi'],
+      physical_format: 'paperback',
+      edition_name: 'Second Dell printing',
+    });
+    expect(detail.editions[1]).toMatchObject({
+      language: 'fre',
+      languages: ['fre'],
+      edition_name: 'First Edition.',
+    });
+    expect(detail.editions[1]).not.toHaveProperty('physical_format');
+    expect(detail.editions[2]).toMatchObject({ physical_format: 'Hard Cover' });
+    expect(detail.editions[2]).not.toHaveProperty('language');
+    expect(detail.editions[2]).not.toHaveProperty('languages');
+    expect(detail.editions[2]).not.toHaveProperty('edition_name');
+    expect(detail.editions[3]).not.toHaveProperty('physical_format');
+    expect(detail.editions[3]).not.toHaveProperty('edition_name');
+    const list = await getOpenLibraryService().getEditions('OL1W', 100, 0, createMockContext());
+    expect(list?.editions[0]).toMatchObject({
+      physical_format: 'paperback',
+      edition_name: 'Second Dell printing',
+    });
+    expect(list?.editions[1]).not.toHaveProperty('physical_format');
+    expect(list?.editions[1]).toHaveProperty('edition_name', 'First Edition.');
+    expect(list?.editions[2]).toHaveProperty('physical_format', 'Hard Cover');
+    expect(list?.editions[2]).not.toHaveProperty('edition_name');
+    expect(list?.editions[3]).not.toHaveProperty('physical_format');
+  });
+
+  it.each([
+    { query: 'dune' },
+    { author: 'Herbert' },
+    { language: 'fre' },
+    { query: 'language:fre' },
+    { publisher: 'Penguin' },
+  ])('preserves provider selection for %j', async (params) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      searchResponse({
+        edition_count: 77,
+        editions: {
+          numFound: 6,
+          docs: [
+            {
+              key: '/books/OL1M',
+              title: 'Selected',
+              language: ['eng', 'fre'],
+              publisher: ['A', 'B'],
+            },
+            { key: '/books/OL2M', title: 'Second' },
+          ],
+        },
+      }),
+    );
+    const result = await getOpenLibraryService().searchBooks(
+      { ...params, limit: 100, offset: 0 },
+      createMockContext(),
+    );
+    expect(result.works[0]).toMatchObject({
+      edition_count: 77,
+      matching_edition_count: 6,
+      matching_edition: {
+        edition_id: 'OL1M',
+        title: 'Selected',
+        languages: ['eng', 'fre'],
+        publishers: ['A', 'B'],
+      },
+    });
+    const fields = new URL(requestUrl(fetchSpy.mock.calls[0]?.[0])).searchParams
+      .get('fields')
+      ?.split(',');
+    expect(fields).toEqual(
+      expect.arrayContaining([
+        'editions',
+        'editions.key',
+        'editions.title',
+        'editions.language',
+        'editions.publisher',
+      ]),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [undefined, {}],
+    [{ numFound: 0, docs: [] }, { matching_edition_count: 0 }],
+    [{ numFound: 4, docs: [{}] }, { matching_edition_count: 4 }],
+    [
+      { numFound: 1, docs: [{ key: '/books/OL1M' }] },
+      { matching_edition_count: 1, matching_edition: { edition_id: 'OL1M' } },
+    ],
+    [{ numFound: 'bad', docs: [{ key: null, title: 3, language: 'fre' }] }, {}],
+  ])('keeps sparse nested search metadata absent: %j', async (editions, expected) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(searchResponse({ editions }));
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'dune', limit: 1, offset: 0 },
+      createMockContext(),
+    );
+    expect(result.works[0]).toMatchObject(expected);
+    if (!('matching_edition' in expected))
+      expect(result.works[0]).not.toHaveProperty('matching_edition');
+    if (!('matching_edition_count' in expected))
+      expect(result.works[0]).not.toHaveProperty('matching_edition_count');
+  });
+});
+
 describe('OpenLibraryService — upstream 404 handling', () => {
   beforeEach(() => {
     initOpenLibraryService();
@@ -178,7 +398,10 @@ describe('OpenLibraryService — upstream 404 handling', () => {
   it('surfaces a clean NotFound (not FetchHttpError) through the author resource on a 404', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(notFoundResponse());
     const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL999999999999A' });
-    const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL999999999999A') });
+    const ctx = createMockContext({
+      uri: new URL('openlibrary://authors/OL999999999999A'),
+      errors: openlibraryAuthorResource.errors,
+    });
 
     const error = await Promise.resolve(openlibraryAuthorResource.handler(params, ctx)).catch(
       (e) => e,
@@ -1277,7 +1500,10 @@ describe('OpenLibraryService — merged author redirects', () => {
     });
 
     const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL2162284A' });
-    const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL2162284A') });
+    const ctx = createMockContext({
+      uri: new URL('openlibrary://authors/OL2162284A'),
+      errors: openlibraryAuthorResource.errors,
+    });
     const result = await openlibraryAuthorResource.handler(params, ctx);
 
     expect(result.name).toBe('Stephen King');
@@ -1669,9 +1895,7 @@ describe('OpenLibraryService — merged work redirects', () => {
     expect(result.structuredContent).not.toHaveProperty('notice');
   });
 
-  // `notice` is last-wins, so a merged work with a capped subject list must
-  // carry both disclosures in one string rather than losing the first.
-  it('openlibrary_get_work joins the merge notice with the subject-cap notice', async () => {
+  it('openlibrary_get_work preserves the merge notice alongside every subject', async () => {
     mockFetchRoutes({
       '/works/OL2714496W.json': workStub('OL2714496W', '/works/OL2714491W'),
       '/works/OL2714491W.json': {
@@ -1685,7 +1909,13 @@ describe('OpenLibraryService — merged work redirects', () => {
     const notice = (result.structuredContent as { notice?: string }).notice;
     expect(notice).toContain('OL2714496W');
     expect(notice).toContain('OL2714491W');
-    expect(notice).toContain('showing 10 of 12');
+    expect(notice).not.toContain('capped');
+    const text = contentText(result);
+    expect(text).toContain('subject-10');
+    expect(text).toContain('subject-11');
+    expect(result.structuredContent).toMatchObject({
+      subjects: expect.arrayContaining(['subject-10', 'subject-11']),
+    });
   });
 
   it('openlibrary_get_work reports not_found for a stub whose location is not a work OLID', async () => {
@@ -1745,7 +1975,10 @@ describe('OpenLibraryService — merged work redirects', () => {
     });
 
     const params = openlibraryWorkResource.params!.parse({ work_id: 'OL2714496W' });
-    const ctx = createMockContext({ uri: new URL('openlibrary://works/OL2714496W') });
+    const ctx = createMockContext({
+      uri: new URL('openlibrary://works/OL2714496W'),
+      errors: openlibraryWorkResource.errors,
+    });
     const result = await openlibraryWorkResource.handler(params, ctx);
 
     expect(result.title).toBe('The little book of letting go');
@@ -1764,7 +1997,10 @@ describe('OpenLibraryService — merged work redirects', () => {
     });
 
     const params = openlibraryWorkResource.params!.parse({ work_id: 'OL7353617M' });
-    const ctx = createMockContext({ uri: new URL('openlibrary://works/OL7353617M') });
+    const ctx = createMockContext({
+      uri: new URL('openlibrary://works/OL7353617M'),
+      errors: openlibraryWorkResource.errors,
+    });
     const error = await Promise.resolve(openlibraryWorkResource.handler(params, ctx)).catch(
       (e) => e,
     );
@@ -1882,7 +2118,10 @@ describe('OpenLibraryService — author lookups reject records of another type',
     mockFetchRoutes({ '/authors/OL7353617M.json': EDITION_AT_AUTHOR_URL });
 
     const params = openlibraryAuthorResource.params!.parse({ author_id: 'OL7353617M' });
-    const ctx = createMockContext({ uri: new URL('openlibrary://authors/OL7353617M') });
+    const ctx = createMockContext({
+      uri: new URL('openlibrary://authors/OL7353617M'),
+      errors: openlibraryAuthorResource.errors,
+    });
     const error = await Promise.resolve(openlibraryAuthorResource.handler(params, ctx)).catch(
       (e) => e,
     );

@@ -3,7 +3,7 @@
  * @module tests/tools/openlibrary-get-cover-url.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openlibraryGetCoverUrl } from '@/mcp-server/tools/definitions/openlibrary-get-cover-url.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -76,5 +76,20 @@ describe('openlibraryGetCoverUrl', () => {
     const text = (openlibraryGetCoverUrl.format!(output)[0] as { text: string }).text;
     expect(text).toContain('https://covers.openlibrary.org/b/id/123-M.jpg');
     expect(text).toContain('HTTP 200');
+  });
+
+  it('renders the returned URL as an image while preserving the structured URL', async () => {
+    const result = await runToolContract(openlibraryGetCoverUrl, {
+      identifier: '123',
+      id_type: 'id',
+    });
+    expect(result.structuredContent).toMatchObject({
+      url: 'https://covers.openlibrary.org/b/id/123-M.jpg',
+    });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('![Cover](<https://covers.openlibrary.org/b/id/123-M.jpg>)');
   });
 });

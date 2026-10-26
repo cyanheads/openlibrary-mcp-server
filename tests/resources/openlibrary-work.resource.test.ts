@@ -27,7 +27,10 @@ describe('openlibraryWorkResource', () => {
   });
 
   it('returns work data for valid work_id', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -41,7 +44,10 @@ describe('openlibraryWorkResource', () => {
   });
 
   it('throws not_found for invalid work_id', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryWorkResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

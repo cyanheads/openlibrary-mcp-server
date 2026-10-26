@@ -249,8 +249,8 @@ describe('openlibraryGetEdition', () => {
     expect(result.editions).toHaveLength(50);
   });
 
-  it('rejects a batch past the cap at the schema', () => {
-    const identifiers = Array.from({ length: 51 }, (_, i) => `OL${7353617 + i}M`);
+  it('rejects a batch past the raw input ceiling at the schema', () => {
+    const identifiers = Array.from({ length: 1001 }, (_, i) => `OL${7353617 + i}M`);
     expect(() => openlibraryGetEdition.input.parse({ identifiers, id_type: 'olid' })).toThrow();
   });
 
@@ -264,6 +264,7 @@ describe('openlibraryGetEdition', () => {
     const blocks = openlibraryGetEdition.format!({
       editions: [FULL_EDITION],
       unresolved: [],
+      unprocessed: [],
     });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('OL7353617M');
@@ -280,6 +281,7 @@ describe('openlibraryGetEdition', () => {
       openlibraryGetEdition.format!({
         editions: [FULL_EDITION, SECOND_EDITION],
         unresolved: [],
+        unprocessed: [],
       })[0] as { text: string }
     ).text;
     expect(text).toContain('The Great Gatsby');
@@ -291,6 +293,7 @@ describe('openlibraryGetEdition', () => {
     const text = (
       openlibraryGetEdition.format!({
         editions: [FULL_EDITION],
+        unprocessed: [],
         unresolved: [
           { identifier: 'OL99999999M', reason: 'not_found' },
           { identifier: 'nope', reason: 'invalid_identifier' },
@@ -303,7 +306,11 @@ describe('openlibraryGetEdition', () => {
 
   it('renders the control number and the call number as separate, differently-labelled fields', () => {
     const text = (
-      openlibraryGetEdition.format!({ editions: [FULL_EDITION], unresolved: [] })[0] as {
+      openlibraryGetEdition.format!({
+        editions: [FULL_EDITION],
+        unresolved: [],
+        unprocessed: [],
+      })[0] as {
         text: string;
       }
     ).text;
@@ -319,7 +326,11 @@ describe('openlibraryGetEdition', () => {
       authors: [{ name: 'George Orwell', author_id: 'OL273387A', source: 'work' as const }],
     };
     const text = (
-      openlibraryGetEdition.format!({ editions: [workSourced], unresolved: [] })[0] as {
+      openlibraryGetEdition.format!({
+        editions: [workSourced],
+        unresolved: [],
+        unprocessed: [],
+      })[0] as {
         text: string;
       }
     ).text;
@@ -343,7 +354,9 @@ describe('openlibraryGetEdition', () => {
       cover_ids: [],
     };
     const text = (
-      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [] })[0] as { text: string }
+      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [], unprocessed: [] })[0] as {
+        text: string;
+      }
     ).text;
     expect(text).toContain('OL1M');
   });

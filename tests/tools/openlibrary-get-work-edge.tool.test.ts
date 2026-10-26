@@ -178,9 +178,9 @@ describe('openlibraryGetWork — edge cases and security', () => {
     expect(text).toContain('OL1A');
   });
 
-  // ─── Subject text capping (#13) ──────────────────────────────────────────────
+  // ─── Complete subject text (#13) ────────────────────────────────────────────
 
-  it('caps subjects in text and discloses the omitted count, keeping the full array', async () => {
+  it('renders every subject without an obsolete cap notice', async () => {
     const ctx = createMockContext({ errors: openlibraryGetWork.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -196,19 +196,16 @@ describe('openlibraryGetWork — edge cases and security', () => {
     // structuredContent keeps every subject.
     expect(result.subjects).toHaveLength(12);
 
-    // The enrichment trailer discloses the cap and the true total.
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toContain('showing 10 of 12');
-    expect(enrichment.notice).toContain('structuredContent');
+    expect(enrichment.notice).toBeUndefined();
 
-    // The text renders only the first 10 (SUBJECTS_TEXT_CAP).
     const text = (openlibraryGetWork.format!(result)[0] as { text: string }).text;
     expect(text).toContain('subject-09');
-    expect(text).not.toContain('subject-10');
-    expect(text).not.toContain('subject-11');
+    expect(text).toContain('subject-10');
+    expect(text).toContain('subject-11');
   });
 
-  it('does not disclose subject capping at exactly the cap (boundary)', async () => {
+  it('renders ten subjects without an obsolete cap notice', async () => {
     const ctx = createMockContext({ errors: openlibraryGetWork.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -220,7 +217,7 @@ describe('openlibraryGetWork — edge cases and security', () => {
     const input = openlibraryGetWork.input.parse({ work_id: SPARSE_WORK.work_id });
     const result = await openlibraryGetWork.handler(input, ctx);
 
-    // At exactly the cap nothing is omitted — no disclosure, all 10 render in text.
+    // All ten values render on both surfaces.
     expect(getEnrichment(ctx).notice).toBeUndefined();
     const text = (openlibraryGetWork.format!(result)[0] as { text: string }).text;
     expect(text).toContain('subject-09');

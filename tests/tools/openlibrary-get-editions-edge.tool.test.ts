@@ -6,6 +6,7 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEditions } from '@/mcp-server/tools/definitions/openlibrary-get-editions.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -55,14 +56,98 @@ describe('openlibraryGetEditions — edge cases', () => {
     initOpenLibraryService();
   });
 
+  it('preserves cataloged format and printing on both surfaces', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getEditions').mockResolvedValue({
+      total: 1,
+      work_id: 'OL1W',
+      editions: [
+        {
+          edition_id: 'OL1M',
+          title: 'A printing',
+          publishers: [],
+          languages: [],
+          isbn_10: [],
+          isbn_13: [],
+          cover_ids: [],
+          physical_format: 'paperback',
+          edition_name: 'Second Dell printing',
+        },
+      ],
+    });
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL1W' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      editions: [{ physical_format: 'paperback', edition_name: 'Second Dell printing' }],
+    });
+    expect(JSON.stringify(result.content)).toContain('paperback');
+    expect(JSON.stringify(result.content)).toContain('Second Dell printing');
+  });
+
   // ─── Input validation ───────────────────────────────────────────────────────
 
   it('rejects limit below 1', () => {
     expect(() => openlibraryGetEditions.input.parse({ work_id: 'OL45804W', limit: 0 })).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() => openlibraryGetEditions.input.parse({ work_id: 'OL45804W', limit: 101 })).toThrow();
+  it('accepts limit above 100 for clamping', () => {
+    expect(openlibraryGetEditions.input.parse({ work_id: 'OL45804W', limit: 101 }).limit).toBe(101);
+  });
+
+  it('clamps one page while retaining merged-ID notice and the actual next offset', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi
+      .spyOn(svc, 'getEditions')
+      .mockResolvedValue({ total: 200, work_id: 'OL2W', editions: [] });
+    const result = await runToolContract(openlibraryGetEditions, {
+      work_id: 'OL1W',
+      limit: 101,
+      offset: 999,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]!.slice(0, 3)).toEqual(['OL1W', 100, 999]);
+    expect(result.structuredContent).toMatchObject({
+      total: 200,
+      offset: 999,
+      notice: expect.stringContaining('merged record'),
+    });
+    expect(contentText(result)).toContain(
+      'Requested limit 101; applied limit 100. Next offset: 999.',
+    );
+  });
+
+  it('renders multiline metadata, present empty publication and parent work, and zero pages literally', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const edition = {
+      edition_id: 'OL1M',
+      title: 'A *title*\n# second',
+      publish_date: '',
+      publishers: ['A|B', ''],
+      languages: ['eng', ''],
+      isbn_10: ['*isbn*'],
+      isbn_13: [],
+      cover_ids: [0],
+      work_id: '',
+      page_count: 0,
+    };
+    vi.spyOn(svc, 'getEditions').mockResolvedValue({
+      total: 1,
+      work_id: 'OL1W',
+      editions: [edition],
+    });
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL1W' });
+    expect(result.structuredContent).toMatchObject({ editions: [edition] });
+    const text = contentText(result);
+    expect(text).toContain(`**Title:** ${escapeMarkdownInline(edition.title)}`);
+    expect(text).toContain(escapeMarkdownInline('*isbn*'));
+    for (const value of ['Published:', '**Work ID:** ', 'Pages: 0', '**Cover IDs:** 0'])
+      expect(text).toContain(value);
   });
 
   it('rejects negative offset', () => {

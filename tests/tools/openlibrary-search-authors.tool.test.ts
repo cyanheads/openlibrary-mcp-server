@@ -3,7 +3,7 @@
  * @module tests/tools/openlibrary-search-authors.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibrarySearchAuthors } from '@/mcp-server/tools/definitions/openlibrary-search-authors.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -23,6 +23,88 @@ const MOCK_AUTHOR = {
 describe('openlibrarySearchAuthors', () => {
   beforeEach(() => {
     initOpenLibraryService();
+  });
+
+  it('characterizes a populated page without changing totals or offset', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({ total: 300, authors: [MOCK_AUTHOR] });
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const result = await openlibrarySearchAuthors.handler(
+      openlibrarySearchAuthors.input.parse({ query: 'name', limit: 100, offset: 20 }),
+      ctx,
+    );
+    expect(result).toEqual({ total: 300, offset: 20, authors: [MOCK_AUTHOR] });
+    expect(getEnrichment(ctx)).toEqual({ totalCount: 300 });
+  });
+
+  it('clamps a large page before calling upstream and composes an empty-page notice', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi.spyOn(svc, 'searchAuthors').mockResolvedValueOnce({ total: 3, authors: [] });
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const result = await openlibrarySearchAuthors.handler(
+      openlibrarySearchAuthors.input.parse({ query: 'name', limit: 101, offset: 20 }),
+      ctx,
+    );
+    expect(spy).toHaveBeenCalledExactlyOnceWith('name', 100, 20, ctx);
+    expect(result).toEqual({ total: 3, offset: 20, authors: [] });
+    expect(getEnrichment(ctx).notice).toContain('past the end');
+    expect(getEnrichment(ctx).notice).toContain('Requested limit 101');
+    expect(getEnrichment(ctx).notice).toContain('Next offset: 20');
+  });
+
+  it('renders all subjects, exact ratings, optional empty values, and literal Markdown', () => {
+    const author = {
+      ...MOCK_AUTHOR,
+      name: '*Name*',
+      birth_date: '',
+      death_date: '',
+      top_work: '',
+      ratings_average: 3.912345,
+      top_subjects: ['a', 'b', 'c', 'd', 'e', 'last*subject'],
+    };
+    const text = (
+      openlibrarySearchAuthors.format!({ total: 1, offset: 0, authors: [author] })[0] as {
+        text: string;
+      }
+    ).text;
+    expect(text).toContain('last\\*subject');
+    expect(text).toContain('3.912345');
+    expect(text).toContain('Born: ');
+    expect(text).toContain('Died: ');
+    expect(text).toContain('**Top work:** ');
+    expect(text).toContain('\\*Name\\*');
+  });
+
+  it('returns a clamped populated page and its continuation on both surfaces', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi
+      .spyOn(svc, 'searchAuthors')
+      .mockResolvedValueOnce({ total: 300, authors: [MOCK_AUTHOR] });
+    const result = await runToolContract(openlibrarySearchAuthors, {
+      query: 'name',
+      limit: 250,
+      offset: 40,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.slice(0, 3)).toEqual(['name', 100, 40]);
+    expect(result.structuredContent).toMatchObject({
+      total: 300,
+      offset: 40,
+      authors: [MOCK_AUTHOR],
+      notice: 'Requested limit 250; applied limit 100. Next offset: 41.',
+    });
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    expect(text).toContain('Requested limit 250; applied limit 100. Next offset: 41.');
+    expect(text).toContain('F. Scott Fitzgerald');
   });
 
   it('returns authors for a matching query', async () => {
@@ -147,5 +229,7 @@ describe('openlibrarySearchAuthors', () => {
     const text = (openlibrarySearchAuthors.format!(output)[0] as { text: string }).text;
     expect(text).toContain('OL1A');
     expect(text).toContain('Anonymous');
+    expect(text).toContain('**Alternate names:** []');
+    expect(text).toContain('**Top subjects:** []');
   });
 });

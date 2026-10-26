@@ -23,6 +23,13 @@ export type SearchWork = {
    */
   availability?: WorkAvailability | null | undefined;
   ia_identifiers: string[];
+  matching_edition?: {
+    edition_id: string;
+    title?: string;
+    languages?: string[];
+    publishers?: string[];
+  };
+  matching_edition_count?: number;
 };
 
 /**
@@ -63,6 +70,8 @@ export type EditionSummary = {
   edition_id: string;
   title: string;
   publish_date?: string;
+  physical_format?: string;
+  edition_name?: string;
   publishers: string[];
   languages: string[];
   isbn_10: string[];
@@ -92,6 +101,9 @@ export type EditionDetail = {
   publish_date?: string | undefined;
   publishers: string[];
   language?: string | undefined;
+  languages?: string[];
+  physical_format?: string;
+  edition_name?: string;
   isbn_10: string[];
   isbn_13: string[];
   oclc: string[];

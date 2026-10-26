@@ -4,7 +4,7 @@
  * @module services/open-library/open-library-service
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
 import {
   McpError,
   serviceUnavailable,
@@ -246,6 +246,8 @@ type RawEditionDetails = {
   title?: string;
   authors?: Array<{ key: string; name?: string }>;
   publish_date?: string;
+  physical_format?: unknown;
+  edition_name?: unknown;
   publishers?: string[];
   languages?: Array<{ key: string }>;
   isbn_10?: string[];
@@ -282,6 +284,63 @@ const EBOOK_ACCESS_TIERS: ReadonlySet<string> = new Set<SearchWork['ebook_access
 /** Strips a leading path segment prefix from an OL ID (e.g. "/works/OL45804W" → "OL45804W"). */
 function stripPrefix(id: string, prefix: string): string {
   return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}
+
+/** Sparse edition metadata nested under search work records. */
+const searchEditionsSchema = z.object({
+  numFound: z.number().int().nonnegative().optional().catch(undefined),
+  docs: z
+    .array(
+      z.object({
+        key: z.string().optional().catch(undefined),
+        title: z.string().optional().catch(undefined),
+        language: z.array(z.string()).optional().catch(undefined),
+        publisher: z.array(z.string()).optional().catch(undefined),
+      }),
+    )
+    .optional()
+    .catch(undefined),
+});
+
+/** Only validation messages cross the search error boundary; upstream input and bodies stay private. */
+const searchValidationSchema = z.object({
+  detail: z.array(z.object({ msg: z.string().min(1) })).min(1),
+});
+
+/** Parses the framework's captured HTTP error body without exposing malformed or unrelated fields. */
+function searchValidationMessages(body: unknown): string[] | undefined {
+  if (typeof body !== 'string') return;
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return;
+  }
+  const parsed = searchValidationSchema.safeParse(value);
+  return parsed.success ? parsed.data.detail.map((detail) => detail.msg) : undefined;
+}
+
+/** Projects the provider's first ranked edition and independent matching count. */
+function matchingEdition(
+  raw: unknown,
+): Pick<SearchWork, 'matching_edition' | 'matching_edition_count'> {
+  const parsed = searchEditionsSchema.safeParse(raw);
+  if (!parsed.success) return {};
+  const selected = parsed.data.docs?.[0];
+  const editionId = selected?.key ? stripPrefix(selected.key, '/books/') : '';
+  return {
+    ...(parsed.data.numFound !== undefined ? { matching_edition_count: parsed.data.numFound } : {}),
+    ...(selected && editionId
+      ? {
+          matching_edition: {
+            edition_id: editionId,
+            ...(selected.title !== undefined ? { title: selected.title } : {}),
+            ...(selected.language !== undefined ? { languages: selected.language } : {}),
+            ...(selected.publisher !== undefined ? { publishers: selected.publisher } : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 /** Normalizes an author identifier to its bare OLID form ("/authors/OL24638A" → "OL24638A"). */
@@ -690,6 +749,7 @@ export class OpenLibraryService {
   ): Promise<{ raw: R; canonicalId: string } | null> {
     const idKey = `${chain.label.toLowerCase()}Id`;
     let id = stripPrefix(requestedId, chain.prefix);
+    if (chain.prefix === '/authors/' && id.length === 0) return null;
     // A re-merge can point back at an ID already visited; stopping on a repeat
     // fails a cycle closed immediately instead of burning the whole hop budget.
     const visited = new Set<string>([id]);
@@ -776,7 +836,7 @@ export class OpenLibraryService {
     qs.set('offset', String(params.offset));
 
     const baseFields =
-      'key,title,author_name,author_key,first_publish_year,edition_count,cover_i,subject,ebook_access,has_fulltext,ratings_average,ia';
+      'key,title,author_name,author_key,first_publish_year,edition_count,cover_i,subject,ebook_access,has_fulltext,ratings_average,ia,editions,editions.key,editions.title,editions.language,editions.publisher';
     const fields = params.include_availability ? `${baseFields},availability` : baseFields;
     qs.set('fields', fields);
 
@@ -800,8 +860,24 @@ export class OpenLibraryService {
         ratings_average?: number;
         availability?: unknown;
         ia?: string[];
+        editions?: unknown;
       }>;
-    }>(url, ctx, 'search');
+    }>(url, ctx, 'search').catch((error: unknown) => {
+      if (ctx.signal.aborted || !(error instanceof McpError) || error.data?.status !== 422) {
+        throw error;
+      }
+      const messages = searchValidationMessages(error.data.body);
+      throw validationError(
+        messages
+          ? `Open Library rejected this search: ${messages.join('; ')}`
+          : 'Open Library rejected this search query or its filters.',
+        {
+          reason: 'invalid_search_query',
+          status: 422,
+          ...(messages ? { validation_messages: messages } : {}),
+        },
+      );
+    });
 
     const works: SearchWork[] = raw.docs.map((doc) => {
       const workId = doc.key ? stripPrefix(doc.key, '/works/') : '';
@@ -826,6 +902,7 @@ export class OpenLibraryService {
           ? toWorkAvailability(doc.availability)
           : undefined,
         ia_identifiers: doc.ia ?? [],
+        ...matchingEdition(doc.editions),
       };
     });
 
@@ -931,6 +1008,8 @@ export class OpenLibraryService {
         key: string;
         title?: string;
         publish_date?: string;
+        physical_format?: unknown;
+        edition_name?: unknown;
         publishers?: string[];
         languages?: Array<{ key: string }>;
         isbn_10?: string[];
@@ -947,6 +1026,12 @@ export class OpenLibraryService {
       edition_id: stripPrefix(e.key ?? '', '/books/'),
       title: e.title ?? '',
       ...(e.publish_date ? { publish_date: e.publish_date } : {}),
+      ...(typeof e.physical_format === 'string' && e.physical_format.length > 0
+        ? { physical_format: e.physical_format }
+        : {}),
+      ...(typeof e.edition_name === 'string' && e.edition_name.length > 0
+        ? { edition_name: e.edition_name }
+        : {}),
       publishers: e.publishers ?? [],
       languages: (e.languages ?? []).map((l) => extractLanguageCode(l.key)),
       isbn_10: e.isbn_10 ?? [],
@@ -1044,8 +1129,17 @@ export class OpenLibraryService {
       title: d.title ?? '',
       authors: fallback?.authors ?? inlineAuthors,
       ...(d.publish_date ? { publish_date: d.publish_date } : {}),
+      ...(typeof d.physical_format === 'string' && d.physical_format.length > 0
+        ? { physical_format: d.physical_format }
+        : {}),
+      ...(typeof d.edition_name === 'string' && d.edition_name.length > 0
+        ? { edition_name: d.edition_name }
+        : {}),
       publishers: d.publishers ?? [],
       ...(d.languages?.[0] ? { language: extractLanguageCode(d.languages[0].key) } : {}),
+      ...(d.languages?.length
+        ? { languages: d.languages.map((language) => extractLanguageCode(language.key)) }
+        : {}),
       isbn_10: d.isbn_10 ?? [],
       isbn_13: d.isbn_13 ?? [],
       oclc: mergeOclcNumbers(d),
@@ -1318,6 +1412,7 @@ export class OpenLibraryService {
     ctx: Context,
     deadlineAt: number,
   ): Promise<{ total: number; author_id: string; works: AuthorWork[] } | null> {
+    if (id.length === 0) return null;
     const url = `${BASE_URL}/authors/${id}/works.json?limit=${limit}&offset=${offset}`;
     ctx.log.debug('Fetching author works', { authorId: id, limit, offset });
 
@@ -1402,7 +1497,7 @@ export class OpenLibraryService {
     work_count: number;
     works: SubjectWork[];
   }> {
-    const subjectKey = subject.toLowerCase().replace(/\s+/g, '_');
+    const subjectKey = subject.trim().toLowerCase().replace(/\s+/g, '_');
     const qs = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),

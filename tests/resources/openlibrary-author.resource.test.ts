@@ -30,7 +30,10 @@ describe('openlibraryAuthorResource', () => {
   });
 
   it('returns author data for valid author_id', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -46,7 +49,10 @@ describe('openlibraryAuthorResource', () => {
   });
 
   it('throws not_found for invalid author_id', async () => {
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: openlibraryAuthorResource.errors,
+    });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

@@ -133,7 +133,7 @@ describe('openlibraryGetAuthor — edge cases and security', () => {
     expect(text).toContain('librarything');
   });
 
-  it('format does not emit external_ids section when remote_ids is empty', () => {
+  it('format preserves empty required collections', () => {
     const sparse = {
       author_id: 'OL1A',
       name: 'Author',
@@ -141,7 +141,8 @@ describe('openlibraryGetAuthor — edge cases and security', () => {
       remote_ids: {},
     };
     const text = (openlibraryGetAuthor.format!(sparse)[0] as { text: string }).text;
-    expect(text).not.toContain('External IDs');
+    expect(text).toContain('**External IDs:** {}');
+    expect(text).toContain('**Photo IDs:** []');
   });
 
   it('format does not emit undefined or null literals', () => {

@@ -11,12 +11,7 @@
  * heading produces `### ` with nothing after it, which reads as a truncated
  * record rather than an untitled one.
  *
- * These stand in for the empty value in the rendered `content[]` text only —
- * `structuredContent` keeps `''`. They are literal markers rather than the
- * record identifier: every heading that uses one is immediately followed by a
- * line carrying that identifier, so falling back to it would print it twice.
+ * The heading marker is authored Markdown; the formatter also labels the empty
+ * title explicitly. A separate identifier line anchors the record.
  */
 export const NO_TITLE = '*(no title recorded)*';
-
-/** Heading placeholder for a record whose name is absent upstream. */
-export const NO_NAME = '*(no name recorded)*';

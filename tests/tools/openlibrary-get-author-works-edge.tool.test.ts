@@ -22,10 +22,10 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
     ).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() =>
-      openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 101 }),
-    ).toThrow();
+  it('accepts a limit above 100 for clamping', () => {
+    expect(openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 101 }).limit).toBe(
+      101,
+    );
   });
 
   it('rejects negative offset', () => {
@@ -70,6 +70,13 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
         },
       },
     });
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    expect(text).toContain('not_found');
+    expect(text).toContain(
+      openlibraryGetAuthorWorks.errors!.find((e) => e.reason === 'not_found')!.recovery,
+    );
   });
 
   // ─── Empty works list ────────────────────────────────────────────────────────

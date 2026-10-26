@@ -4,7 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryWorkResource = resource('openlibrary://works/{work_id}', {
@@ -34,10 +34,19 @@ export const openlibraryWorkResource = resource('openlibrary://works/{work_id}',
     last_modified: z.string().optional().describe('ISO 8601 last-modified timestamp.'),
   }),
 
+  errors: [
+    {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The requested work does not exist on Open Library.',
+      recovery: 'Verify the Work ID or find a work with openlibrary_search_books and retry.',
+    },
+  ],
+
   async handler(params, ctx) {
     ctx.log.info('Fetching work resource', { work_id: params.work_id });
     const result = await getOpenLibraryService().getWork(params.work_id, ctx);
-    if (!result) throw notFound(`Work ${params.work_id} not found on Open Library.`);
+    if (!result) throw ctx.fail('not_found', `Work ${params.work_id} not found on Open Library.`);
     return result;
   },
 });

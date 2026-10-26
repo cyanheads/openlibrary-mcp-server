@@ -15,12 +15,41 @@ describe('openlibraryGetSubject — edge cases and security', () => {
 
   // ─── Input validation ───────────────────────────────────────────────────────
 
+  it('keeps blank subjects advertised as strings for handler validation', () => {
+    expect(openlibraryGetSubject.input.parse({ subject: '  ' }).subject).toBe('  ');
+    expect(openlibraryGetSubject.input.parse({ subject: '' }).subject).toBe('');
+  });
+
+  it.each(['', '   ', '\t\n'])(
+    'rejects blank subject %j before the service with recovery on both surfaces',
+    async (subject) => {
+      const svc = (
+        await import('@/services/open-library/open-library-service.js')
+      ).getOpenLibraryService();
+      const spy = vi
+        .spyOn(svc, 'getSubject')
+        .mockResolvedValue({ subject_name: '', subject_key: '', work_count: 0, works: [] });
+      const result = await runToolContract(openlibraryGetSubject, { subject });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_subject',
+            recovery: { hint: expect.stringContaining('subject name') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('subject name');
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects limit below 1', () => {
     expect(() => openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 0 })).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() => openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 101 })).toThrow();
+  it('accepts limit above 100 for clamping', () => {
+    expect(openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 101 }).limit).toBe(101);
   });
 
   it('rejects negative offset', () => {
@@ -42,7 +71,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Unknown subject ─────────────────────────────────────────────────────────
 
   it('returns a zero-work success for an unknown subject, with actionable guidance', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -65,7 +94,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Unicode subjects ────────────────────────────────────────────────────────
 
   it('handles unicode subject without error', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -84,7 +113,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Injection attempts ──────────────────────────────────────────────────────
 
   it('passes injection-attempt subject to service unchanged', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -104,7 +133,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   });
 
   it('handles subject with special chars in enrichment notice', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -130,7 +159,7 @@ describe('openlibraryGetSubject — edge cases and security', () => {
   // ─── Works with covers ──────────────────────────────────────────────────────
 
   it('returns numeric cover_id in works', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

@@ -10,7 +10,7 @@
 | `openlibrary_search_inside` | Full-text search inside the scanned text of Internet Archive books. Returns matching items with snippets and a relevance score. Usually takes 10–30 s. | `query`, `limit`, `offset` | `readOnlyHint: true` |
 | `openlibrary_get_work` | Fetch a work by Open Library Work ID (OL…W), following merge redirects to the canonical work. Returns title, description, subjects, cover IDs, and linked author IDs for follow-up lookups. | `work_id` | `readOnlyHint: true` |
 | `openlibrary_get_editions` | List editions of a work — different publishers, languages, and formats — following merge redirects to the canonical work. Returns ISBNs, publisher, language, page count, and edition OLIDs. | `work_id`, `limit`, `offset` | `readOnlyHint: true` |
-| `openlibrary_get_edition` | Resolve 1–50 editions of one identifier type in a single upstream request: ISBN-10, ISBN-13, OCLC, LCCN, or OLID (OL…M). Returns full edition metadata including identifiers, publisher, language, and the parent work, with per-identifier misses in `unresolved`. | `identifiers`, `id_type` | `readOnlyHint: true, idempotentHint: true` |
+| `openlibrary_get_edition` | Resolve the first 50 distinct edition identifiers in one upstream batch: ISBN-10, ISBN-13, OCLC, LCCN, or OLID (OL…M). Returns edition metadata, per-identifier misses in `unresolved`, and remaining inputs in `unprocessed`. | `identifiers`, `id_type` | `readOnlyHint: true, idempotentHint: true` |
 | `openlibrary_search_authors` | Search authors by name. Returns Open Library Author IDs, names, birth/death dates, and top works. | `query`, `limit`, `offset` | `readOnlyHint: true` |
 | `openlibrary_get_author` | Fetch author detail by Open Library Author ID (OL…A). Returns bio, birth/death dates, photo IDs, and remote IDs (Wikidata, VIAF, ISNI, Goodreads, LibraryThing). | `author_id` | `readOnlyHint: true, idempotentHint: true` |
 | `openlibrary_get_author_works` | List works by an author. Returns titles, cover IDs, and work OLIDs for drilling into editions or details. | `author_id`, `limit`, `offset` | `readOnlyHint: true` |
@@ -24,6 +24,8 @@
 | `openlibrary://works/{work_id}` | Work detail by OL Work ID. Injectable context for chat about a specific book. | No |
 | `openlibrary://authors/{author_id}` | Author detail by OL Author ID. Injectable context. | No |
 
+Both resources declare `not_found` with the existing NotFound code and message. JSON-RPC errors carry `data.reason`, a request ID, and recovery guidance naming `openlibrary_search_books` or `openlibrary_search_authors` respectively.
+
 ### Prompts
 
 None. The server is data/lookup-oriented; no recurring interaction patterns warrant a template.
@@ -34,7 +36,7 @@ None. The server is data/lookup-oriented; no recurring interaction patterns warr
 
 Read-only access to Open Library (Internet Archive) — a catalog of 20M+ book editions covering metadata, author info, subject browsing, and reading availability. Designed for educators, researchers, librarians, and agents that need book lookups, bibliography construction, reading list generation, or identifier resolution (ISBN, OCLC, LCCN, OLID).
 
-The server wraps six Open Library API surfaces: Search, Works, Editions (Books), Authors, Subjects, and Covers. No authentication required. Rate limits are not officially published; the service layer always includes a `User-Agent` header (community convention to signal a well-behaved client).
+The server wraps Open Library's search, work, edition, author, and subject APIs and constructs Covers API URLs. No authentication is required. Open Library [publishes limits](https://openlibrary.org/developers/api#rate-limits) of one request per second for unidentified clients and three for identified requests; the service includes a `User-Agent` with a contact email.
 
 ---
 
@@ -83,9 +85,10 @@ Every request runs through one fetch path: `fetchWithTimeout` inside `withRetry`
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `OPENLIBRARY_USER_AGENT` | No | Custom `User-Agent` string. Default: `openlibrary-mcp-server/1.0 (openlibrary@archive.org)`. Including a contact email is community convention for well-behaved bots. |
+| `OPENLIBRARY_USER_AGENT` | No | Custom `User-Agent` string. Default: `openlibrary-mcp-server casey@caseyjhand.com`. Include a contact email. |
+| `OPENLIBRARY_CLAMP_LIMITS` | No | Default `true`: clamp page requests to 100 and process the first 50 distinct edition identifiers. `false` restores the original advertised schema bounds. Parsed with `z.stringbool()`. |
 
-No API key required. The `User-Agent` header is the only runtime knob, and it has a sensible default.
+No API key is required.
 
 ---
 
@@ -115,7 +118,7 @@ The Open Library data model has two key entity types agents need to navigate:
 | **Edition** | `OL…M` | A specific printing — tied to ISBN(s), publisher, language, format |
 | **Author** | `OL…A` | Author record with bio, dates, linked remote IDs |
 
-A Work has N Editions; an Edition belongs to exactly one Work.
+A work can have many editions. An edition's parent work link may be absent from the catalog response.
 
 ### Merged records
 
@@ -147,7 +150,7 @@ https://covers.openlibrary.org/a/{key_type}/{value}-{size}.jpg   (author photos)
 `key_type`: `id`, `isbn`, `olid`, `lccn`, `oclc`  
 `size`: `S` (small), `M` (medium), `L` (large)
 
-The API returns the image directly as HTTP 200 (no redirect). For missing or nonexistent covers, it returns HTTP 200 with a 1×1 placeholder GIF — not a 404. The `openlibrary_get_cover_url` tool constructs and returns the URL; the presence of a real image cannot be confirmed without fetching it.
+The [Covers API](https://openlibrary.org/dev/docs/api/covers) returns a blank image by default when a cover is missing; `?default=false` requests a 404 instead. Rate limits can also produce error statuses. The tool constructs the default URL without fetching it, so its result cannot confirm image availability.
 
 ### Reading availability
 
@@ -214,6 +217,14 @@ The work tools accept only work IDs: an ISBN passed as `work_id` fails validatio
 
 ## Tool Design Details
 
+### Shared output and limit policy
+
+Text and structured output preserve the same complete domain values, without text-only list caps or rounded numbers. Markdown literals, links, and images retain their underlying values.
+
+`src/mcp-server/tools/limit-policy.ts` owns page schemas, clamping, notices, and telemetry. With `OPENLIBRARY_CLAMP_LIMITS=true`, all six paginated tools accept positive safe-integer limits above 100 and apply 100 before the request. A composed notice reports requested/applied limits and the next offset (requested offset plus returned rows); existing merge and empty-page notices survive. Each clamp logs once and increments a tool-labelled counter. With the switch false, schemas advertise `maximum: 100` and reject excess limits before the handler. Defaults, offsets, totals, and lower bounds are unchanged.
+
+The published `openlibrary-guide` is delivered through MCP skill discovery and `skill://` resources. It covers edition evidence, identifier chains, sparse metadata, passage search, and recovery decisions.
+
 ### `openlibrary_search_books`
 
 **Input schema:**
@@ -237,7 +248,7 @@ z.object({
   sort:     z.enum(['relevance', 'new', 'old', 'rating', 'editions'])
     .default('relevance')
     .describe('Sort order. "relevance" uses Solr scoring. "new"/"old" sort by first publish year. "rating" by average community rating. "editions" by edition count.'),
-  limit:    z.number().int().min(1).max(100).default(10)
+  limit:    paginationLimit(10)
     .describe('Max results to return. Higher values increase response size; prefer 10–20 for exploration.'),
   offset:   z.number().int().min(0).default(0)
     .describe('Zero-based offset for pagination.'),
@@ -254,10 +265,13 @@ The `availability` object shape (when present): `status` (required — observed 
 
 **Errors:**
 - `unknown_language_code` — `ValidationError`: a 2-letter `language` value has no MARC equivalent, so no filter could be applied. Raised in the service before any request.
+- `invalid_search_query` — `ValidationError`: the search endpoint returned HTTP 422. Only validated upstream validation messages are exposed; malformed detail receives a generic recovery message. The input schema and query/filter forwarding remain unchanged, including empty-query filter searches.
+
+**Selected edition:** optional `matching_edition` contains `edition_id` and any supplied `title`, `languages`, and `publishers`; optional `matching_edition_count` preserves the nested provider count even if no selected record is present. The nested search fields are requested in the same upstream call for every search mode. Selection is provider-ranked and can reflect field filters, query syntax, and unfielded terms; it does not prove that every term matched the edition. Work totals and pagination retain their meaning.
 
 ### `openlibrary_search_inside`
 
-**Input:** `query` (non-empty; quote a phrase for an exact match), `limit` (1–100, default 10), `offset` (default 0).
+**Input:** `query` (non-empty; quote a phrase for an exact match), `limit` (positive integer, applied ceiling 100, default 10), `offset` (default 0).
 
 **Output:** `total`, `offset`, `matches[]` — each: `ia_identifier`, `title` (optional), `creator` (optional), `snippets[]` (highlight markers stripped), `score`. The endpoint is an Elasticsearch passthrough: `fields` values arrive as arrays, metadata keys are `meta_`-prefixed.
 
@@ -272,14 +286,14 @@ The `availability` object shape (when present): `status` (required — observed 
 
 **Resolution:** the service's work resolver follows `/type/redirect` stubs whose `location` normalizes to `OL\d+W`, up to four hops, stopping on a repeated ID; any record not typed `/type/work` resolves to not found. All hops share one 50 s budget. A live work costs one request. The `openlibrary://works/{work_id}` resource, which has no input pattern, resolves through the same path.
 
-**Output:** `work_id` (the canonical ID — differs from the input when that ID was merged), `title`, `description`, `subjects[]`, `subject_places[]`, `subject_times[]`, `subject_people[]`, `cover_ids[]`, `author_ids[]`, `created`, `last_modified`. The enrichment `notice` names the requested and canonical IDs when they differ, joined with the subject-cap disclosure into one string (`notice` is last-wins).
+**Output:** `work_id` (the canonical ID — differs from the input when that ID was merged), `title`, `description`, `subjects[]`, `subject_places[]`, `subject_times[]`, `subject_people[]`, `cover_ids[]`, `author_ids[]`, `created`, `last_modified`. The enrichment `notice` names the requested and canonical IDs when they differ.
 
 **Errors:**
 - `not_found` — `NotFound`: no work under that ID, or its redirect chain reaches no work (missing or non-work `location`, cycle, past the hop cap). Recovery names `openlibrary_search_books` and, for a caller holding an ISBN, `openlibrary_get_edition`.
 
 ### `openlibrary_get_editions`
 
-**Input:** `work_id` (same pattern and rejection as `openlibrary_get_work`), `limit` (1–100, default 10), `offset` (default 0).
+**Input:** `work_id` (same pattern and rejection as `openlibrary_get_work`), `limit` (positive integer, applied ceiling 100, default 10), `offset` (default 0).
 
 **Resolution:** the editions page is fetched directly first. Only a null page (a merge stub's `editions.json` 404s) pays for the work resolver, and the page is then re-fetched under the canonical ID with the caller's `limit` and `offset` — a one-hop stub costs four requests, a live work one. Every request of the call shares one 50 s budget.
 
@@ -294,7 +308,7 @@ The endpoint neither clamps nor reports the offset — an offset past the end is
 
 ### `openlibrary_get_edition`
 
-**Input:** `identifiers` (1–50 strings, all of one type) and `id_type` (`isbn` | `oclc` | `lccn` | `olid`). ISBNs are 10 or 13 digits with hyphens optional, and an ISBN-10 may end in an `X`/`x` check digit; OCLC numbers are numeric; OLIDs match `OL…M` in either case; LCCNs pass through unchecked. A malformed identifier is reported per entry as `invalid_identifier` and never sent upstream.
+**Input:** `identifiers` (1–1,000 strings with clamping enabled; 1–50 with it disabled) and `id_type` (`isbn` | `oclc` | `lccn` | `olid`). In enabled mode, exact duplicates collapse in first-occurrence order before the first 50 distinct entries are selected. Case and ISBN punctuation are not canonicalized for deduplication. Malformed identifiers consume a selected slot. ISBNs are 10 or 13 digits with hyphens optional, and an ISBN-10 may end in an `X`/`x` check digit; OCLC numbers are numeric; OLIDs match `OL…M` in either case; LCCNs pass through unchecked. A malformed identifier is reported per entry as `invalid_identifier` and never sent upstream.
 
 **Routing:** every `id_type` → one `GET /api/books.json?bibkeys={TYPE}:{id},…&format=json&jscmd=details` per batch (record timeout class). `jscmd=details` wraps each edition under a `details` key, carries `works[].key` (`jscmd=data` omits it), and embeds author names inline. ISBN bibkeys drop hyphens and upper-case an `x` check digit; the caller's spelling is echoed back.
 
@@ -309,9 +323,13 @@ The endpoint neither clamps nor reports the offset — an offset past the end is
 - `invalid_identifier` — `ValidationError`: every identifier is malformed for the id_type.
 - `upstream_unavailable` — `ServiceUnavailable`, retryable: the bibkeys route failed upstream. Retry the same call later.
 
+**Edition evidence:** detail adds optional `languages` in catalog order while retaining `language` as the first code. List and detail expose optional `physical_format` and `edition_name` verbatim; null, missing, and empty values are omitted independently.
+
+**Continuation:** `unprocessed` carries every remaining distinct input verbatim, including an empty array when none remain. A shortened batch reports raw requested, distinct, and processed counts and logs/counts the clamp once. All-failure errors retain `invalid_identifier`/`not_found` and carry the remainder in typed data and text-visible recovery. No additional bibkeys batch is issued.
+
 ### `openlibrary_search_authors`
 
-**Input:** `query: string`, `limit` (1–100, default 10), `offset` (default 0).
+**Input:** `query: string`, `limit` (positive integer, applied ceiling 100, default 10), `offset` (default 0).
 
 **Output:** `total`, `offset` (the requested offset, echoed), `authors[]` — each: `author_id`, `name`, `alternate_names[]`, `birth_date`, `death_date`, `top_work`, `work_count`, `top_subjects[]`, `ratings_average`.
 
@@ -321,14 +339,14 @@ The endpoint neither clamps nor reports the offset — an offset past the end is
 
 **Output:** `author_id`, `name`, `personal_name`, `fuller_name`, `bio`, `birth_date`, `death_date`, `photo_ids[]`, `remote_ids` (object with optional keys: `wikidata`, `viaf`, `isni`, `goodreads`, `librarything`).
 
-**Resolution:** the same merge-redirect resolver as works (`/type/redirect` stubs whose `location` normalizes to an author OLID, either case, up to four hops, one 50 s budget); any record not typed `/type/author` resolves to not found, with no merge notice. No input pattern — every ID form the upstream answers with an author record resolves. The `openlibrary://authors/{author_id}` resource and `openlibrary_get_author_works` share it.
+**Resolution:** the same merge-redirect resolver as works (`/type/redirect` stubs whose `location` normalizes to an author OLID, either case, up to four hops, one 50 s budget); any record not typed `/type/author` resolves to not found, with no merge notice. Empty IDs after `/authors/` prefix stripping return not found before either resolver or direct works-page fetch. Nonempty IDs retain permissive handling, without an input pattern. The `openlibrary://authors/{author_id}` resource and `openlibrary_get_author_works` share this policy.
 
 **Errors:**
 - `not_found` — `NotFound`: no author under that ID, a record of another type (a work or edition OLID), or a redirect chain that reaches no author. Verify the OLID or search by name first.
 
 ### `openlibrary_get_author_works`
 
-**Input:** `author_id: string`, `limit` (1–100, default 20), `offset` (default 0).
+**Input:** `author_id: string`, `limit` (positive integer, applied ceiling 100, default 20), `offset` (default 0).
 
 **Output:** `total` (mapped from the API's `size` field), `offset` (the requested offset, echoed — the endpoint neither clamps nor reports it), `author_id` (the canonical ID after a merge redirect), `works[]` — each: `work_id`, `title`, `first_publish_date` (optional), `cover_ids[]`.
 
@@ -340,8 +358,8 @@ The endpoint neither clamps nor reports the offset — an offset past the end is
 ```ts
 z.object({
   subject: z.string()
-    .describe('Subject name. Normalized before lookup — lowercased with spaces converted to underscores (e.g., "Science Fiction" → "science_fiction").'),
-  limit: z.number().int().min(1).max(100).default(12)
+    .describe('Subject name. Trimmed, lowercased, and normalized from whitespace to underscores (e.g., " Science Fiction " → "science_fiction").'),
+  limit: paginationLimit(12)
     .describe('Max works to return. Subject pages typically show 12 at a time.'),
   offset: z.number().int().min(0).default(0),
 })
@@ -349,7 +367,7 @@ z.object({
 
 **Output:** `subject_name`, `subject_key`, `work_count`, `offset` (the requested offset, echoed on every path, the empty-subject return included), `works[]` — each: `work_id`, `title`, `author_names[]`, `edition_count`, `cover_id`.
 
-**Errors:** none declared. Open Library answers any subject key with HTTP 200 — an unknown subject echoes the key with `work_count: 0` — so an empty subject is a success carrying a notice that suggests a different word form, a synonym, or a broader term.
+**Errors:** `invalid_subject` (`ValidationError`) rejects blank-after-trim input before a request. Unknown nonblank subjects remain successful zero-work pages, with a notice suggesting a different word form, synonym, or broader term.
 
 ### `openlibrary_get_cover_url`
 
@@ -367,9 +385,9 @@ z.object({
 })
 ```
 
-**Output:** `url: string` — direct HTTPS URL to the cover image served from `covers.openlibrary.org`. The cover API returns the image directly (HTTP 200) — there is no client-side redirect to follow.
+**Output:** `url: string` — HTTPS URL on `covers.openlibrary.org`, rendered as a Markdown image, and `note: string` explaining that the image was not fetched or verified.
 
-**Implementation note:** The covers API returns HTTP 200 for missing covers with a 1×1 placeholder GIF rather than a 404. The `not_found` error cannot be detected from the HTTP status alone. The tool should return the URL as-is and note in the output that the caller may receive a placeholder if no cover exists. Do not declare a `not_found` error contract for this tool — it cannot be reliably signaled.
+**Implementation note:** Missing covers can produce a placeholder image. Since this tool makes no request, it cannot declare `not_found` or infer access from an HTTP status.
 
 ---
 
@@ -379,8 +397,8 @@ z.object({
 - **`availability` adds latency** — the `availability` field in search triggers a cross-request to archive.org. This is why it's opt-in.
 - **Full-text search is slow** — `/search/inside.json` usually answers in 10–30 s on a healthy upstream (12–13 s typical in recent runs, up to ~30 s; the search engine itself reports ~2 s), hence its 45 s attempt timeout. A timed-out attempt is never re-issued; a 429 or network error still retries within the 50 s deadline.
 - **Subjects are uncontrolled vocabulary** — Open Library subjects are user-contributed strings, highly inconsistent (`"Science fiction"`, `"science fiction"`, `"SF"` are separate subjects). `openlibrary_get_subject` normalizes to lowercase and underscores, but exact subject discovery may require trial-and-error.
-- **Sparse edition data** — many older or community-contributed editions have missing fields (no page count, no language code, no cover). The service layer treats all edition fields except `title` and `edition_id` as optional.
-- **Rate limits are unpublished** — Open Library has not published official rate limits. The service layer always sends a `User-Agent` header (community convention for well-behaved bots). Tools that resolve secondary data for multiple items (e.g., author names for many editions) should sequence requests carefully rather than fan out in parallel.
+- **Sparse edition data** — many older or community-contributed editions lack page counts, language codes, covers, or parent-work links. Optional scalars stay absent; required collection fields can be empty.
+- **Shared upstream limits** — Open Library publishes request limits; secondary author lookups also consume that allowance. A `User-Agent` identifies requests but does not guarantee capacity.
 - **Works API doesn't return author names** — `GET /works/{id}.json` returns author keys, not names. Agents that need names alongside work data should use `openlibrary_search_books` (which does return `author_name[]`) or follow up with `openlibrary_get_author`.
 
 ---
@@ -407,7 +425,7 @@ z.object({
 ### Covers
 `https://covers.openlibrary.org/b/{key_type}/{value}-{size}.jpg` — books  
 `https://covers.openlibrary.org/a/{key_type}/{value}-{size}.jpg` — authors  
-Sizes: `S`, `M`, `L`. Returns the image directly as HTTP 200. Missing covers return a 1×1 placeholder GIF, not 404.
+Sizes: `S`, `M`, `L`. The default missing-cover response is a blank image; the tool does not fetch it.
 
 ### Pagination
 Search: `offset`+`limit` or `page`+`limit` (page is 1-indexed). Works/editions, author works: `offset`+`limit`, with `next` link in response. Subjects: `offset`+`limit`.
@@ -422,12 +440,12 @@ HTTP 404 returns `{"error": "notfound", "key": "…"}`. HTTP 200 with empty `doc
 | Decision | Rationale |
 |:---------|:----------|
 | **No `openlibrary_resolve_identifier` wrapper tool** — edition lookup goes directly through `openlibrary_get_edition` with `id_type` enum | The id_type enum on `get_edition` is self-documenting and avoids a redundant tool. Agents pass the identifier and its type together — there's no ambiguity to resolve. |
-| **`openlibrary_search_books` returns work-level records, not editions** | The Open Library search API is work-oriented. Surfacing edition breakdown at search level would require N+1 calls. Agents that need a specific edition drill down via `get_editions` or `get_edition`. |
+| **Search retains work rows and exposes the provider-selected edition** | Nested edition fields arrive in the same Search API response, preserving the provider's selection without extra lookups or a local Solr parser. Detailed edition verification still uses `get_edition` or `get_editions`. |
 | **`include_availability` is opt-in boolean, not a separate tool** | Availability data comes from the same search endpoint via an extra field selector, but adds latency. Folding it into the search tool as an opt-in preserves the fast path for the common case. |
-| **`openlibrary_get_cover_url` returns a URL string, not the image bytes** | MCP tools return text/structured data, not binary. Cover URLs can be embedded in markdown (`![cover](url)`) or passed to an image tool. Fetching and base64-encoding cover bytes would exceed reasonable context budgets. |
+| **`openlibrary_get_cover_url` returns a URL string** | The client can render the image URL directly. Constructing it requires no image fetch and makes no availability claim. |
 | **No `openlibrary_get_reading_list` or user account tools** | The "Your Books" and "Lists" APIs require OAuth and are write-capable. Out of scope for a read-only server targeting book discovery, not personal library management. |
 | **Single `OpenLibraryService`** | All Open Library endpoints share base URL, `User-Agent`, retry config, and rate limit. No benefit to splitting by endpoint group. |
-| **`sort` enum limits to 4 values** | Open Library supports ~15 sort facets (raw Solr field sorts). The four meaningful ones for agents: relevance, newest, oldest, most editions, rating. The rest (e.g., `title_sort`, `random`) are either exotic or better expressed by filtering. |
+| **`sort` exposes five values** | Relevance, newest, oldest, most editions, and rating cover the supported discovery paths without exposing arbitrary Solr sort expressions. |
 | **Every `openlibrary_get_edition` id_type routes through `/api/books.json`** | One request per batch with author names inline. The per-ID routes (`/isbn/`, `/books/`) resolved 6 of 10 sampled ISBNs to a different edition than the bibkeys route, carry no inline author names, and 404 on a lowercase OLID, so they are not used even as an outage fallback — which edition an ISBN resolves to must not depend on upstream health. The legacy `/api/books` path (no `.json`) began answering 404 for every bibkey in September 2026. |
 | **Per-endpoint-class timeouts under one 50 s deadline** | A single 15 s timeout was below full-text search latency and re-issued the query until an attempt happened to finish, while a four-attempt ladder against a hung upstream outlasted the 60 s client timeout. Class timeouts wait out a slow answer; the deadline guarantees a classified error first. |
 | **No in-loop retry on 502/503/504 or a 2xx HTML page, via a composed `isTransient` rather than `retryable: false`** | Those are saturation signals: re-sending within seconds adds load without changing the answer. `retryable: false` would also reach the wire and tell the caller never to retry, which is wrong for a transient outage. |

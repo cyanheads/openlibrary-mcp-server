@@ -125,5 +125,8 @@ describe('openlibraryGetEditions', () => {
       .text;
     expect(text).toContain('OL1M');
     expect(text).toContain('Sparse Edition');
+    for (const label of ['Publisher', 'Language', 'ISBN-13', 'ISBN-10', 'Cover IDs']) {
+      expect(text).toContain(`**${label}:** []`);
+    }
   });
 });

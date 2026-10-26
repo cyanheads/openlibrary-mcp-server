@@ -5,15 +5,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { cappedListNotice } from '@/mcp-server/tools/capped-list-notice.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  applyPaginationLimit,
+  composeNotices,
+  paginationLimit,
+  paginationLimitNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
-
-/**
- * Max snippets rendered per match in the `content[]` text. `structuredContent`
- * always carries every snippet the index returned; only the human-facing text is
- * capped, with the omitted count disclosed via the enrichment trailer.
- */
-const SNIPPETS_TEXT_CAP = 3;
 
 export const openlibrarySearchInside = tool('openlibrary_search_inside', {
   title: 'Search Inside Books',
@@ -27,15 +26,9 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
       .describe(
         'Text to find inside scanned books. Wrap in double quotes for an exact-phrase match (e.g., "the spice must flow"); unquoted terms match independently and return far broader results.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(10)
-      .describe(
-        'Max matching items to return. Each carries its own snippets, so higher values grow the response quickly — prefer 10–20.',
-      ),
+    limit: paginationLimit(10).describe(
+      'Max matching items to return. Each carries its own snippets, so higher values grow the response quickly — prefer 10–20.',
+    ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
   output: z.object({
@@ -63,7 +56,7 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
             snippets: z
               .array(z.string())
               .describe(
-                'Passages containing the match, with the upstream highlight markers removed. The text output caps how many are rendered per item; this array is complete.',
+                'Every passage containing the match, with the upstream highlight markers removed.',
               ),
             score: z
               .number()
@@ -89,7 +82,7 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
     },
   ],
 
-  /** Agent-facing context: total match count, empty-result and snippet-cap notices. */
+  /** Agent-facing context: total match count and page guidance. */
   enrichment: {
     totalCount: z
       .number()
@@ -101,7 +94,7 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
       .string()
       .optional()
       .describe(
-        'Guidance when the page is empty (how to broaden a query that matched nothing, or which offset to retry when offset ran past the end) or when the text output capped a per-item snippet list. Absent when neither applies.',
+        'Guidance for an empty page or a requested limit above the page ceiling. Absent when neither applies.',
       ),
   },
 
@@ -113,29 +106,22 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
     });
 
     const svc = getOpenLibraryService();
-    const result = await svc.searchInside(input.query, input.limit, input.offset, ctx);
+    const limit = applyPaginationLimit(input.limit, 'openlibrary_search_inside', ctx);
+    const result = await svc.searchInside(input.query, limit, input.offset, ctx);
+    const limitNotice = paginationLimitNotice(input.limit, input.offset, result.matches.length);
 
     // Always the upstream match count, including on an empty page: an over-paged
     // request matched items, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
-    if (result.matches.length === 0) {
-      ctx.enrich.notice(
-        result.total > 0
+    const emptyNotice =
+      result.matches.length > 0
+        ? undefined
+        : result.total > 0
           ? `Offset ${result.offset} is past the end of the result set — ${result.total} items matched, so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the query itself matched.`
-          : `No scanned book contains ${input.query}. An exact-phrase query only matches the wording as printed — drop the quotes to match the terms independently, or shorten the phrase.`,
-      );
-      return { total: result.total, offset: result.offset, matches: [] };
-    }
-
-    // Disclose what format() caps out of the text; structuredContent keeps every
-    // snippet the index returned.
-    const capNotice = cappedListNotice(
-      result.matches.map((match) => match.snippets.length),
-      SNIPPETS_TEXT_CAP,
-      { label: 'Snippets', unit: 'item', path: 'matches[].snippets' },
-    );
-    if (capNotice) ctx.enrich.notice(capNotice);
+          : `No scanned book contains ${input.query}. An exact-phrase query only matches the wording as printed — drop the quotes to match the terms independently, or shorten the phrase.`;
+    const notice = composeNotices(limitNotice, emptyNotice);
+    if (notice) ctx.enrich.notice(notice);
 
     return { total: result.total, offset: result.offset, matches: result.matches };
   },
@@ -148,13 +134,16 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
 
     for (const match of result.matches) {
       lines.push('');
-      lines.push(`## ${match.title ?? match.ia_identifier}`);
+      lines.push('## Match');
+      if (match.title !== undefined) lines.push(`**Title:** ${escapeMarkdownInline(match.title)}`);
       lines.push(
-        `**IA identifier:** ${match.ia_identifier} | **Score:** ${match.score.toFixed(2)}`,
+        `**IA identifier:** ${escapeMarkdownInline(match.ia_identifier)} | **Score:** ${match.score}`,
       );
-      lines.push(`**Creator:** ${match.creator ?? 'Not available'}`);
-      for (const snippet of match.snippets.slice(0, SNIPPETS_TEXT_CAP)) {
-        lines.push(`> ${snippet}`);
+      if (match.creator !== undefined)
+        lines.push(`**Creator:** ${escapeMarkdownInline(match.creator)}`);
+      if (match.snippets.length === 0) lines.push('**Snippets:** []');
+      for (const snippet of match.snippets) {
+        lines.push(`**Passage:** ${escapeMarkdownInline(snippet)}`);
       }
     }
 

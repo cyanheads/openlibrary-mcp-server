@@ -5,7 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
+import { composeNotices, recordLimitClamp } from '@/mcp-server/tools/limit-policy.js';
 import { getOpenLibraryService, isIsbn } from '@/services/open-library/open-library-service.js';
 import type { AuthorLookupGaps, EditionIdType } from '@/services/open-library/types.js';
 
@@ -15,6 +18,7 @@ import type { AuthorLookupGaps, EditionIdType } from '@/services/open-library/ty
  * which is where one response stops being worth the round trips it saves.
  */
 const MAX_IDENTIFIERS = 50;
+const clampLimits = getServerConfig().clampLimits;
 
 /**
  * Names the shape an identifier was expected to have, or `undefined` when it is
@@ -66,7 +70,7 @@ function authorGapNotice({ failed, skipped }: AuthorLookupGaps): string | undefi
 
 export const openlibraryGetEdition = tool('openlibrary_get_edition', {
   title: 'Get Edition',
-  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream request, so a bibliography or shelf export costs one call rather than one per book; a large batch is a large response, so ask for what you need. Returns full edition metadata including authors, publisher, language, all identifier types, and the parent work ID, with author names inline and no secondary lookup; when the edition record itself lists no authors, they are recovered from the parent work and marked as such, and a notice names any edition whose recovery failed. Partial success is the norm — identifiers that resolve come back in editions, the rest are listed in unresolved with a reason, and the call fails only when nothing resolved.`,
+  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream batch; with limit clamping enabled, exact duplicates collapse and remaining identifiers are returned as unprocessed for another call. Returns full edition metadata including authors, publisher, languages, all identifier types, and the parent work ID. Author names come inline when recorded; otherwise bounded lookups recover parent-work credits marked as such, and a notice names any edition whose recovery failed. Identifiers that resolve come back in editions; processed misses are listed in unresolved with a reason. The call fails only when no processed identifier resolves, and any unprocessed remainder remains in its error data and recovery guidance.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     identifiers: z
@@ -78,9 +82,11 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           ),
       )
       .min(1)
-      .max(MAX_IDENTIFIERS)
+      .max(clampLimits ? 1000 : MAX_IDENTIFIERS)
       .describe(
-        `Identifiers to resolve, 1–${MAX_IDENTIFIERS}, all of the type named by id_type. Resolved editions come back in request order.`,
+        clampLimits
+          ? 'Identifiers to resolve, 1–1000 raw entries, all of the type named by id_type. Exact duplicate strings collapse in first-occurrence order; the first 50 distinct entries are processed, including malformed entries, and remaining strings are returned in unprocessed.'
+          : `Identifiers to resolve, 1–${MAX_IDENTIFIERS}, all of the type named by id_type. Resolved editions come back in request order.`,
       ),
     id_type: z
       .enum(['isbn', 'oclc', 'lccn', 'olid'])
@@ -89,6 +95,11 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       ),
   }),
   output: z.object({
+    unprocessed: z
+      .array(z.string())
+      .describe(
+        'Remaining distinct identifiers in input order, preserved verbatim for another call. Empty when the entire batch was processed.',
+      ),
     editions: z
       .array(
         z
@@ -125,7 +136,27 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
             language: z
               .string()
               .optional()
-              .describe('3-letter ISO language code (e.g., "eng"). Absent when not recorded.'),
+              .describe(
+                'First cataloged language code (e.g., "eng"). Absent when not recorded; languages contains the complete cataloged list.',
+              ),
+            languages: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'All cataloged language codes in upstream order. Absent when no languages are recorded.',
+              ),
+            physical_format: z
+              .string()
+              .optional()
+              .describe(
+                'Cataloged physical format or binding, preserved verbatim. Absent when not recorded.',
+              ),
+            edition_name: z
+              .string()
+              .optional()
+              .describe(
+                'Cataloged edition or printing statement, preserved verbatim. Absent when not recorded.',
+              ),
             isbn_10: z.array(z.string()).describe('ISBN-10 identifiers.'),
             isbn_13: z.array(z.string()).describe('ISBN-13 identifiers.'),
             oclc: z.array(z.string()).describe('OCLC/WorldCat numbers.'),
@@ -215,19 +246,32 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       .string()
       .optional()
       .describe(
-        'Present when author lookups for some editions failed or were skipped: names those editions, whose authors are missing or shown by author ID. Absent when every lookup completed.',
+        'Present when the identifier batch was shortened or author lookups failed or were skipped; includes all applicable guidance.',
       ),
   },
 
   async handler(input, ctx) {
     ctx.log.info('Fetching editions', { count: input.identifiers.length, id_type: input.id_type });
+    const distinct = clampLimits ? [...new Set(input.identifiers)] : input.identifiers;
+    const identifiers = distinct.slice(0, MAX_IDENTIFIERS);
+    const unprocessed = distinct.slice(MAX_IDENTIFIERS);
+    const batchNotice = unprocessed.length
+      ? `${input.identifiers.length} requested identifiers; ${distinct.length} distinct; ${identifiers.length} processed. Resubmit the unprocessed identifiers in another call.`
+      : undefined;
+    if (unprocessed.length) {
+      recordLimitClamp('openlibrary_get_edition', ctx, {
+        requested: input.identifiers.length,
+        distinct: distinct.length,
+        processed: identifiers.length,
+      });
+    }
 
     // A malformed identifier is reported per entry rather than failing the batch,
     // so one bad ISBN in a bibliography does not cost the other nineteen.
     const unresolved: Array<{ identifier: string; reason: 'not_found' | 'invalid_identifier' }> =
       [];
     const wellFormed: string[] = [];
-    for (const identifier of input.identifiers) {
+    for (const identifier of identifiers) {
       if (identifierExpectation(identifier, input.id_type)) {
         unresolved.push({ identifier, reason: 'invalid_identifier' });
       } else {
@@ -251,26 +295,42 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         reason,
         allMalformed
           ? `None of the ${unresolved.length} supplied identifiers are valid for id_type "${input.id_type}".`
-          : `No edition found for any of the ${input.identifiers.length} identifiers of type "${input.id_type}".`,
+          : `No edition found for any of the ${identifiers.length} processed identifiers of type "${input.id_type}".`,
+        unprocessed.length
+          ? {
+              unprocessed,
+              recovery: {
+                hint: `${batchNotice}\n${unprocessed.map((identifier, index) => `Unprocessed identifier ${index + 1}: ${identifier === '' ? '""' : identifier}`).join('\n')}\n${allMalformed ? 'Correct the malformed identifier formats before retrying them.' : 'Verify missing identifiers or search with openlibrary_search_books.'}`,
+              },
+            }
+          : undefined,
       );
     }
 
-    const notice = authorGapNotice(resolved.authorGaps);
+    const notice = composeNotices(batchNotice, authorGapNotice(resolved.authorGaps));
     if (notice) ctx.enrich.notice(notice);
 
-    return { editions: resolved.editions, unresolved };
+    return { editions: resolved.editions, unresolved, unprocessed };
   },
 
   format: (result) => {
+    const literal = (value: string) => (value === '' ? '""' : escapeMarkdownInline(value));
+    const list = (values: string[]) => (values.length ? values.map(literal).join(', ') : '[]');
     const lines: string[] = [];
     const renderAuthor = (a: { name: string; author_id?: string | undefined }) =>
-      a.author_id ? `${a.name} (${a.author_id})` : a.name;
+      a.author_id !== undefined ? `${literal(a.name)} (${literal(a.author_id)})` : literal(a.name);
 
     for (const edition of result.editions) {
-      lines.push(`## ${edition.title || NO_TITLE}`);
-      lines.push(`**Edition ID:** ${edition.edition_id}`);
+      if (edition.title.includes('\n') || edition.title.includes('\r')) {
+        lines.push('## Edition', '', `**Title:** ${escapeMarkdownInline(edition.title)}`);
+      } else {
+        lines.push(`## ${edition.title === '' ? NO_TITLE : escapeMarkdownInline(edition.title)}`);
+        if (edition.title === '') lines.push('**Title:** ""');
+      }
+      lines.push(`**Edition ID:** ${escapeMarkdownInline(edition.edition_id)}`);
       const editionAuthors = edition.authors.filter((a) => a.source === 'edition');
       const workAuthors = edition.authors.filter((a) => a.source === 'work');
+      if (edition.authors.length === 0) lines.push('**Authors:** []');
       if (editionAuthors.length) {
         lines.push(
           `**Authors (recorded on this edition):** ${editionAuthors.map(renderAuthor).join(', ')}`,
@@ -282,35 +342,47 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         );
       }
       const meta: string[] = [];
-      if (edition.publish_date) meta.push(`Published: ${edition.publish_date}`);
-      if (edition.publishers.length) meta.push(`Publisher: ${edition.publishers.join(', ')}`);
-      if (edition.language) meta.push(`Language: ${edition.language}`);
+      if (edition.publish_date !== undefined)
+        meta.push(`Published: ${literal(edition.publish_date)}`);
+      if (edition.publishers.length) meta.push(`Publisher: ${list(edition.publishers)}`);
+      else lines.push('**Publisher:** []');
+      if (edition.language !== undefined) meta.push(`Language: ${literal(edition.language)}`);
       if (edition.page_count != null) meta.push(`Pages: ${edition.page_count}`);
       if (meta.length) lines.push(meta.join(' | '));
-      if (edition.isbn_13.length) lines.push(`**ISBN-13:** ${edition.isbn_13.join(', ')}`);
-      if (edition.isbn_10.length) lines.push(`**ISBN-10:** ${edition.isbn_10.join(', ')}`);
-      if (edition.oclc.length) lines.push(`**OCLC:** ${edition.oclc.join(', ')}`);
-      if (edition.lccn.length) lines.push(`**LCCN:** ${edition.lccn.join(', ')}`);
-      if (edition.lc_classifications.length) {
-        lines.push(`**LC call number:** ${edition.lc_classifications.join(', ')}`);
-      }
-      if (edition.description) {
+      if (edition.languages) lines.push(`**Cataloged languages:** ${list(edition.languages)}`);
+      if (edition.physical_format !== undefined)
+        lines.push(`**Physical format:** ${literal(edition.physical_format)}`);
+      if (edition.edition_name !== undefined)
+        lines.push(`**Edition statement:** ${literal(edition.edition_name)}`);
+      lines.push(`**ISBN-13:** ${list(edition.isbn_13)}`);
+      lines.push(`**ISBN-10:** ${list(edition.isbn_10)}`);
+      lines.push(`**OCLC:** ${list(edition.oclc)}`);
+      lines.push(`**LCCN:** ${list(edition.lccn)}`);
+      lines.push(`**LC call number:** ${list(edition.lc_classifications)}`);
+      if (edition.description !== undefined) {
         lines.push('');
-        lines.push(edition.description);
+        lines.push(`**Description:** ${literal(edition.description)}`);
       }
-      if (edition.cover_ids.length) lines.push(`**Cover IDs:** ${edition.cover_ids.join(', ')}`);
-      if (edition.work_id) lines.push(`**Work ID:** ${edition.work_id}`);
-      if (edition.ebook_url) lines.push(`**E-book:** ${edition.ebook_url}`);
+      lines.push(
+        `**Cover IDs:** ${edition.cover_ids.length ? edition.cover_ids.join(', ') : '[]'}`,
+      );
+      if (edition.work_id !== undefined) lines.push(`**Work ID:** ${literal(edition.work_id)}`);
+      if (edition.ebook_url !== undefined)
+        lines.push(`**E-book:** ${markdownLink(edition.ebook_url, edition.ebook_url)}`);
       lines.push('');
     }
 
     if (result.unresolved.length) {
       lines.push(`**Unresolved (${result.unresolved.length}):**`);
       for (const entry of result.unresolved) {
-        lines.push(`- ${entry.identifier} — ${entry.reason}`);
+        lines.push(`- ${literal(entry.identifier)} — ${entry.reason}`);
       }
-    }
+    } else lines.push('**Unresolved (0):** []');
 
-    return [{ type: 'text', text: lines.join('\n').trimEnd() }];
+    lines.push(`**Unprocessed (${result.unprocessed.length}):**`);
+    for (const identifier of result.unprocessed)
+      lines.push(`- **Identifier:** ${literal(identifier)}`);
+
+    return [{ type: 'text', text: lines.join('\n') }];
   },
 });

@@ -3,7 +3,7 @@
  * @module tests/tools/openlibrary-get-author-works.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetAuthorWorks } from '@/mcp-server/tools/definitions/openlibrary-get-author-works.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -22,6 +22,49 @@ const MOCK_AUTHOR_WORKS_RESULT = {
 };
 
 describe('openlibraryGetAuthorWorks', () => {
+  it('composes a clamped page with merged-author guidance on both surfaces', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi
+      .spyOn(svc, 'getAuthorWorks')
+      .mockResolvedValueOnce({ total: 200, author_id: 'OL19981A', works: [MOCK_WORK] });
+    const result = await runToolContract(openlibraryGetAuthorWorks, {
+      author_id: 'OL2162284A',
+      limit: 101,
+      offset: 40,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.slice(0, 3)).toEqual(['OL2162284A', 100, 40]);
+    expect(result.structuredContent).toMatchObject({
+      total: 200,
+      author_id: 'OL19981A',
+      offset: 40,
+      works: [MOCK_WORK],
+    });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('Requested limit 101; applied limit 100. Next offset: 41.');
+    expect(notice).toContain('OL2162284A is a merged record');
+    expect(
+      result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'),
+    ).toContain(notice);
+  });
+  it('renders a present empty publication date and literal title', () => {
+    const result = {
+      total: 1,
+      author_id: 'OL1A',
+      offset: 0,
+      works: [
+        { work_id: 'OL1W', title: '*title*\n# next', first_publish_date: '', cover_ids: [0] },
+      ],
+    };
+    const text = (openlibraryGetAuthorWorks.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('**First published:** ');
+    expect(text).toContain('\\*title\\*\\\n\\# next');
+    expect(text).toContain('**Cover IDs:** 0');
+  });
   beforeEach(() => {
     initOpenLibraryService();
   });
@@ -149,5 +192,6 @@ describe('openlibraryGetAuthorWorks', () => {
     ).text;
     expect(text).toContain('OL1W');
     expect(text).toContain('Sparse Work');
+    expect(text).toContain('**Cover IDs:** []');
   });
 });

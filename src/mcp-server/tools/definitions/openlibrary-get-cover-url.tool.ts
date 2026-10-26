@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownImage } from '@cyanheads/mcp-ts-core/utils';
 import {
   coverIdentifierExpectation,
   getOpenLibraryService,
@@ -14,7 +15,7 @@ import {
 export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
   title: 'Get Cover URL',
   description:
-    'Resolve a cover image URL for a book or author photo. Returns a direct HTTPS URL in the requested size (S/M/L). The Covers API always returns HTTP 200 — missing covers return a 1×1 placeholder GIF, not a 404 — so the identifier format is validated locally first: "id" must be numeric, "isbn" 10 or 13 digits (an ISBN-10 may end in an X check digit), "olid" an edition OLID (OL…M) for target "book" and an author OLID (OL…A) for target "author". Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected before any request. URLs can be embedded in markdown as ![cover](url).',
+    'Construct a cover image URL for a book or author photo without fetching the image. Returns a direct HTTPS URL in the requested size (S/M/L). The identifier format is validated locally: "id" must be numeric, "isbn" 10 or 13 digits (an ISBN-10 may end in an X check digit), "olid" an edition OLID (OL…M) for target "book" and an author OLID (OL…A) for target "author". Identifiers with path separators or control characters, and author-by-ISBN lookups, are rejected. A returned URL does not verify that a cover exists.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     identifier: z
@@ -43,13 +44,11 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
   output: z.object({
     url: z
       .string()
-      .describe(
-        'Direct HTTPS URL to the cover image. The Covers API returns HTTP 200 for all requests — a 1×1 placeholder GIF is returned when no cover exists for the identifier.',
-      ),
+      .describe('Direct HTTPS URL to the cover image; not fetched or verified by this tool.'),
     note: z
       .string()
       .describe(
-        'Reminder that the URL always returns HTTP 200; a placeholder GIF is served when no cover exists.',
+        'Reminder that the image is unverified and a missing cover may return a placeholder.',
       ),
   }),
 
@@ -99,14 +98,14 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
     const url = svc.getCoverUrl(input.identifier, input.id_type, input.target, input.size);
     return {
       url,
-      note: 'The Covers API returns HTTP 200 for all requests — a 1×1 placeholder GIF is served if no cover exists for this identifier.',
+      note: 'This URL has not been fetched or verified. The Covers API may return HTTP 200 with a placeholder GIF when no cover exists.',
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`**Cover URL:** ${result.url}`);
-    lines.push(`**Note:** ${result.note}`);
+    lines.push(markdownImage('Cover', result.url));
+    lines.push(`**Note:** ${escapeMarkdownInline(result.note)}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

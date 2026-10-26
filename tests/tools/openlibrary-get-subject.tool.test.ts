@@ -3,7 +3,7 @@
  * @module tests/tools/openlibrary-get-subject.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
@@ -30,12 +30,131 @@ const SUBJECT_RESULT = {
 };
 
 describe('openlibraryGetSubject', () => {
+  it('renders an empty work title explicitly beside the authored heading placeholder', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      ...SUBJECT_RESULT,
+      works: [{ ...SUBJECT_RESULT.works[0]!, title: '' }],
+    });
+    const result = await runToolContract(openlibraryGetSubject, { subject: 'fiction' });
+    expect(result.structuredContent).toMatchObject({ works: [{ title: '' }] });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('### *(no title recorded)*');
+    expect(text).toContain('**Title:** ""');
+  });
+  it('escapes caller text inside the authored unknown-subject notice', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      subject_name: 'missing',
+      subject_key: 'missing',
+      work_count: 0,
+      works: [],
+    });
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: '*Subject*\n# literal',
+    });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('\\*Subject\\*\\\n> \\# literal');
+  });
+  it('preserves multiline literal names and empty authors on both surfaces', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const page = {
+      subject_name: '*Subject*\n# literal',
+      subject_key: '<b>subject</b>',
+      work_count: 1,
+      works: [
+        {
+          work_id: 'OL1W',
+          title: '*Title*\n# literal',
+          author_names: [],
+          edition_count: 0,
+          cover_id: 0,
+        },
+      ],
+    };
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(page);
+    const result = await runToolContract(openlibraryGetSubject, { subject: 'subject' });
+    expect(result.structuredContent).toMatchObject(page);
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    for (const value of [
+      '**Subject:** \\*Subject\\*\\\n\\# literal',
+      '**Title:** \\*Title\\*\\\n\\# literal',
+      '\\<b>subject\\</b>',
+      '**Authors:** []',
+      '**Editions:** 0',
+      '**Cover ID:** 0',
+    ])
+      expect(text).toContain(value);
+  });
+
+  it('resumes a shortened page after actual rows and records one clamp', async () => {
+    initOpenLibraryService();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const log = vi.spyOn(ctx.log, 'notice');
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(SUBJECT_RESULT);
+    const result = await openlibraryGetSubject.handler(
+      openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 200, offset: 9 }),
+      ctx,
+    );
+    expect(result).toMatchObject({ work_count: 5432, offset: 9 });
+    expect(spy).toHaveBeenCalledWith('fiction', 100, 9, ctx);
+    expect(getEnrichment(ctx).notice).toBe(
+      'Requested limit 200; applied limit 100. Next offset: 11.',
+    );
+    expect(log).toHaveBeenCalledOnce();
+  });
+  it('clamps an unknown-subject page while composing recovery on both surfaces', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      subject_name: 'missing',
+      subject_key: 'missing',
+      work_count: 0,
+      works: [],
+    });
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'missing',
+      limit: 101,
+      offset: 24,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy).toHaveBeenCalledWith('missing', 100, 24, expect.anything());
+    expect(result.structuredContent).toMatchObject({
+      work_count: 0,
+      offset: 24,
+      notice: expect.stringContaining('synonym'),
+    });
+    expect(JSON.stringify(result.content)).toContain('Next offset: 24');
+  });
   beforeEach(() => {
     initOpenLibraryService();
   });
 
   it('returns subject with works', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -54,7 +173,7 @@ describe('openlibraryGetSubject', () => {
   });
 
   it('treats an unknown subject as an empty result, not a failure', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
@@ -74,8 +193,11 @@ describe('openlibraryGetSubject', () => {
     expect(result.works).toEqual([]);
   });
 
-  it('declares no error contract — every subject key resolves to a success', () => {
-    expect(openlibraryGetSubject.errors).toBeUndefined();
+  it('has no not_found contract for unknown nonblank subject keys', () => {
+    expect(openlibraryGetSubject.errors).not.toContainEqual(
+      expect.objectContaining({ reason: 'not_found' }),
+    );
+    expect(openlibraryGetSubject.errors!.map((entry) => entry.reason)).toEqual(['invalid_subject']);
   });
 
   it('formats subject with all fields', () => {
@@ -109,7 +231,7 @@ describe('openlibraryGetSubject', () => {
   });
 
   it('populates notice enrichment when work_count is 0', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();

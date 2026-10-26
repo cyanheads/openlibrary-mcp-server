@@ -216,9 +216,9 @@ describe('openlibrarySearchBooks', () => {
     expect(input.include_availability).toBe(false);
   });
 
-  // ─── IA-identifier text capping (#11) ────────────────────────────────────────
+  // ─── Complete IA identifiers (#13) ──────────────────────────────────────────
 
-  it('caps IA identifiers in text but keeps the full array in structuredContent', async () => {
+  it('renders all IA identifiers on both surfaces', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -238,20 +238,16 @@ describe('openlibrarySearchBooks', () => {
     // structuredContent (the handler return) keeps every identifier.
     expect(result.works[0]!.ia_identifiers).toHaveLength(48);
 
-    // The enrichment trailer discloses the true total and how many the text shows.
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toContain('Internet Archive');
-    expect(enrichment.notice).toContain('showing 5 of 48');
-    expect(enrichment.notice).toContain('structuredContent');
+    expect(enrichment.notice).toBeUndefined();
 
-    // The text renders only the first 5 (IA_TEXT_CAP) identifiers.
     const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
     expect(text).toContain('ia-004');
-    expect(text).not.toContain('ia-005');
-    expect(text).not.toContain('ia-047');
+    expect(text).toContain('ia-005');
+    expect(text).toContain('ia-047');
   });
 
-  it('does not disclose IA capping when a work has no identifiers', async () => {
+  it('renders an empty IA list without an obsolete cap notice', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -268,7 +264,7 @@ describe('openlibrarySearchBooks', () => {
 
     expect(getEnrichment(ctx).notice).toBeUndefined();
     const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
-    expect(text).not.toContain('**IA:**');
+    expect(text).toContain('**IA:**');
   });
 
   // ─── Over-paged results (offset past the end) ───────────────────────────────
@@ -326,9 +322,9 @@ describe('openlibrarySearchBooks', () => {
     expect(enrichment.notice).not.toContain('past the end');
   });
 
-  // ─── Subject cap: complete in structuredContent, capped in text, disclosed ──
+  // ─── Complete subjects on both surfaces ─────────────────────────────────────
 
-  it('keeps every subject in structuredContent and discloses the text cap', async () => {
+  it('keeps every subject on both surfaces without a cap notice', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -348,17 +344,15 @@ describe('openlibrarySearchBooks', () => {
     expect(result.works[0]!.subjects).toEqual(subjects);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toContain('Subjects are capped at 5');
-    expect(enrichment.notice).toContain('showing 5 of 15');
-    expect(enrichment.notice).toContain('works[].subjects');
+    expect(enrichment.notice).toBeUndefined();
 
     const text = (openlibrarySearchBooks.format!(result)[0] as { text: string }).text;
     expect(text).toContain('subj-004');
-    expect(text).not.toContain('subj-005');
-    expect(text).not.toContain('subj-014');
+    expect(text).toContain('subj-005');
+    expect(text).toContain('subj-014');
   });
 
-  it('composes both cap disclosures into one notice when subjects and IA ids overflow', async () => {
+  it('does not emit cap notices for long subjects and IA lists', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -378,16 +372,10 @@ describe('openlibrarySearchBooks', () => {
     const input = openlibrarySearchBooks.input.parse({ query: 'dune', limit: 1 });
     await openlibrarySearchBooks.handler(input, ctx);
 
-    // `ctx.enrich.notice` is last-wins, so a second call would erase the first —
-    // both disclosures have to arrive in a single notice string.
-    const notice = getEnrichment(ctx).notice as string;
-    expect(notice).toContain('Internet Archive identifiers are capped at 5');
-    expect(notice).toContain('showing 5 of 9');
-    expect(notice).toContain('Subjects are capped at 5');
-    expect(notice).toContain('showing 5 of 12');
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
-  it('does not disclose a subject cap when no work exceeds it', async () => {
+  it('renders a short subject list without an obsolete cap notice', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')

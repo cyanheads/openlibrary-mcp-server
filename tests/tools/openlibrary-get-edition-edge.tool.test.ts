@@ -3,7 +3,8 @@
  * @module tests/tools/openlibrary-get-edition-edge.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetEdition } from '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js';
 import {
@@ -51,6 +52,164 @@ describe('openlibraryGetEdition — edge cases', () => {
   beforeEach(() => {
     initOpenLibraryService();
     vi.restoreAllMocks();
+  });
+
+  it('classifies a mixed malformed and missing batch as not_found without sending malformed entries', async () => {
+    const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [],
+      unresolved: ['OL1M'],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['bad', 'OL1M'],
+      id_type: 'olid',
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'not_found' } } });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toEqual(['OL1M']);
+  });
+
+  it('deduplicates exact strings before the 50-slot batch and preserves the remainder on both surfaces', async () => {
+    const distinct = Array.from({ length: 52 }, (_, i) => `OL${i + 1}M`);
+    const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [FULL_EDITION],
+      unresolved: [],
+      authorGaps: { failed: ['OL7353617M'], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: [distinct[0]!, ...distinct],
+      id_type: 'olid',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toEqual(distinct.slice(0, 50));
+    expect(result.structuredContent).toMatchObject({
+      unprocessed: ['OL51M', 'OL52M'],
+      notice: expect.stringContaining('53 requested'),
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    for (const value of ['OL51M', 'OL52M', '52 distinct', '50 processed', 'Author lookups'])
+      expect(text).toContain(value);
+  });
+
+  it.each(['invalid_identifier', 'not_found'] as const)(
+    'keeps all-failure %s and every remaining value in typed data and recovery',
+    async (reason) => {
+      const first = Array.from({ length: 50 }, (_, i) =>
+        reason === 'invalid_identifier' ? `bad-${i}` : `OL${i + 1}M`,
+      );
+      const remainder = ['remaining *value*\nnext', ''];
+      const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+        editions: [],
+        unresolved: first,
+        authorGaps: { failed: [], skipped: [] },
+      });
+      const result = await runToolContract(openlibraryGetEdition, {
+        identifiers: [...first, ...remainder],
+        id_type: 'olid',
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason,
+            unprocessed: remainder,
+            recovery: {
+              hint: expect.stringContaining(
+                'Unprocessed identifier 1: remaining *value*\nnext\nUnprocessed identifier 2: ""',
+              ),
+            },
+          },
+        },
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('Unprocessed identifier 1: remaining \\*value\\*\\\nnext');
+      expect(text).toContain('Unprocessed identifier 2: ""');
+      expect(spy).toHaveBeenCalledTimes(reason === 'invalid_identifier' ? 0 : 1);
+    },
+  );
+
+  it('counts malformed inputs as processed slots and retains case variants without false duplicate-only clamp', async () => {
+    const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [FULL_EDITION],
+      unresolved: [],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['bad', 'OL1M', 'ol1m', 'OL1M'],
+      id_type: 'olid',
+    });
+    expect(spy.mock.calls[0]![0]).toEqual(['OL1M', 'ol1m']);
+    expect(result.structuredContent).toMatchObject({
+      unresolved: [{ identifier: 'bad', reason: 'invalid_identifier' }],
+      unprocessed: [],
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('renders literal multiline metadata, present empty values, and exact numeric values on both surfaces', async () => {
+    const edition = {
+      ...FULL_EDITION,
+      title: 'One *title*\n# second',
+      publish_date: '',
+      language: '',
+      work_id: '',
+      description: '<b>literal</b>\n- item',
+      page_count: 0,
+      authors: [{ name: 'A *name*\nsecond', author_id: '', source: 'work' as const }],
+      publishers: ['One|Two', ''],
+      ebook_url: 'https://archive.org/a_(b)',
+    };
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [edition],
+      unresolved: [],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['OL7353617M'],
+      id_type: 'olid',
+    });
+    expect(result.structuredContent).toMatchObject({ editions: [edition] });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(`**Title:** ${escapeMarkdownInline(edition.title)}`);
+    expect(text).toContain(escapeMarkdownInline(edition.description));
+    expect(text).toContain(escapeMarkdownInline(edition.authors[0]!.name));
+    for (const value of ['Published:', 'Language:', '**Work ID:**', 'Pages: 0'])
+      expect(text).toContain(value);
+    expect(text).toContain(markdownLink(edition.ebook_url, edition.ebook_url));
+  });
+
+  it('preserves every cataloged language and printing field on both surfaces', async () => {
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [
+        {
+          ...FULL_EDITION,
+          languages: ['eng', 'chi'],
+          physical_format: 'paperback',
+          edition_name: 'Second Dell printing',
+        },
+      ],
+      unresolved: [],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['OL7353617M'],
+      id_type: 'olid',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      editions: [
+        {
+          language: 'eng',
+          languages: ['eng', 'chi'],
+          physical_format: 'paperback',
+          edition_name: 'Second Dell printing',
+        },
+      ],
+    });
+    const text = JSON.stringify(result.content);
+    for (const value of ['eng', 'chi', 'paperback', 'Second Dell printing'])
+      expect(text).toContain(value);
   });
 
   // ─── ISBN validation ────────────────────────────────────────────────────────
@@ -142,7 +301,11 @@ describe('openlibraryGetEdition — edge cases', () => {
       authors: [{ name: 'Anonymous Author', source: 'edition' as const }],
     };
     const text = (
-      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+      openlibraryGetEdition.format!({
+        editions: [edition],
+        unresolved: [],
+        unprocessed: [],
+      })[0] as { text: string }
     ).text;
     expect(text).toContain('Anonymous Author');
     // Should not show parenthetical ID
@@ -158,7 +321,11 @@ describe('openlibraryGetEdition — edge cases', () => {
       ],
     };
     const text = (
-      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+      openlibraryGetEdition.format!({
+        editions: [edition],
+        unresolved: [],
+        unprocessed: [],
+      })[0] as { text: string }
     ).text;
     expect(text).toContain('**Authors (recorded on this edition):** Edition Credit (OL1A)');
     expect(text).toContain('from parent work');
@@ -169,7 +336,11 @@ describe('openlibraryGetEdition — edge cases', () => {
   it('formats edition without ebook url', () => {
     const edition = { ...FULL_EDITION, ebook_url: undefined };
     const text = (
-      openlibraryGetEdition.format!({ editions: [edition], unresolved: [] })[0] as { text: string }
+      openlibraryGetEdition.format!({
+        editions: [edition],
+        unresolved: [],
+        unprocessed: [],
+      })[0] as { text: string }
     ).text;
     expect(text).not.toContain('E-book:');
   });
@@ -188,9 +359,61 @@ describe('openlibraryGetEdition — edge cases', () => {
       cover_ids: [],
     };
     const text = (
-      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [] })[0] as { text: string }
+      openlibraryGetEdition.format!({ editions: [sparse], unresolved: [], unprocessed: [] })[0] as {
+        text: string;
+      }
     ).text;
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
+    for (const label of [
+      'Authors',
+      'Publisher',
+      'ISBN-13',
+      'ISBN-10',
+      'OCLC',
+      'LCCN',
+      'LC call number',
+      'Cover IDs',
+    ]) {
+      expect(text).toContain(`**${label}:** []`);
+    }
+  });
+
+  it('restores raw-array bounds and duplicate results when clamping is disabled', async () => {
+    vi.stubEnv('OPENLIBRARY_CLAMP_LIMITS', 'false');
+    vi.resetModules();
+    try {
+      const { openlibraryGetEdition: strict } = await import(
+        '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js'
+      );
+      const service = await import('@/services/open-library/open-library-service.js');
+      service.initOpenLibraryService();
+      const spy = vi
+        .spyOn(service.getOpenLibraryService(), 'getEditionsByIdentifiers')
+        .mockResolvedValue({
+          editions: [FULL_EDITION, FULL_EDITION],
+          unresolved: [],
+          authorGaps: { failed: [], skipped: [] },
+        });
+      const tooMany = await runToolContract(strict, {
+        identifiers: Array(51).fill('OL7353617M'),
+        id_type: 'olid',
+      });
+      expect(tooMany.isError).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+      const result = await runToolContract(strict, {
+        identifiers: ['OL7353617M', 'OL7353617M'],
+        id_type: 'olid',
+      });
+      expect(spy.mock.calls[0]![0]).toEqual(['OL7353617M', 'OL7353617M']);
+      expect(result.structuredContent).toMatchObject({
+        editions: [FULL_EDITION, FULL_EDITION],
+        unprocessed: [],
+      });
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });

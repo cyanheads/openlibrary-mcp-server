@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/openlibrary-mcp-server</h1>
   <p><b>Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools • 2 Resources</div>
+  <div>10 Tools • 2 Catalog Resources • 1 Agent Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openlibrary-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openlibrary-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openlibrary-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,16 +25,16 @@
 
 ## Overview
 
-Open Library's catalog of 20M+ books, editions, authors, and subjects, plus full-text search across Internet Archive's scanned books. Search and browse from any MCP client, drill from a work into its editions or an author into their works, and resolve cover and author-photo URLs. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Open Library's catalog of 20M+ books, editions, authors, and subjects, plus full-text search inside Internet Archive's scanned books. Search and browse, drill from a work into its editions or an author into their works, and construct cover image URLs.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `openlibrary_search_books` | Full-text book search with field filters (title, author, subject, publisher, ISBN, language), sort options, pagination, and optional live reading availability |
+| `openlibrary_search_books` | Catalog search with field filters (title, author, subject, publisher, ISBN, language), a provider-selected edition, pagination, and optional live reading availability |
 | `openlibrary_get_work` | Fetch a work by Open Library Work ID (OL…W) — title, description, subjects, cover IDs, and author IDs |
 | `openlibrary_get_editions` | List editions of a work — publishers, languages, formats, ISBNs, and print run details |
-| `openlibrary_get_edition` | Resolve up to 50 editions in one call by ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M), reporting per-identifier misses |
+| `openlibrary_get_edition` | Resolve up to 50 distinct identifiers per call by ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M), reporting misses and unprocessed identifiers |
 | `openlibrary_search_authors` | Search authors by name — returns Author IDs, birth/death dates, top works, and subject associations |
 | `openlibrary_get_author` | Fetch author detail by Open Library Author ID (OL…A) — bio, dates, photo IDs, and linked identifiers from Wikidata, VIAF, ISNI, Goodreads, and LibraryThing |
 | `openlibrary_get_author_works` | List works by an author — titles, cover IDs, and Work OLIDs for drilling into editions or details |
@@ -51,7 +51,13 @@ Open Library's catalog of 20M+ books, editions, authors, and subjects, plus full
 
 Both resources mirror data also available via `openlibrary_get_work` and `openlibrary_get_author` — useful for clients that don't surface MCP resources.
 
+### Agent skill
+
+[`openlibrary-guide`](./skills/openlibrary-guide/SKILL.md) covers edition selection, bibliography resolution, passage identification, and incomplete metadata. It is included in npm, Docker, and desktop bundles and served through MCP skill discovery and `skill://` resources.
+
 ## Capability reference
+
+Paginated tools return at most 100 rows per call. Larger positive integer limits are clamped with a notice showing the applied limit and next offset. `OPENLIBRARY_CLAMP_LIMITS=false` restores schema rejection above 100. Text and structured output carry the same complete domain data, including arrays and numeric precision.
 
 ### `openlibrary_search_books` <sub>tool</sub>
 
@@ -59,7 +65,9 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 - `sort`: `relevance` (default), `new`, `old`, `rating`, `editions`
 - `language` accepts a 3-letter MARC code or a translatable 2-letter ISO code; an untranslatable 2-letter code fails as `unknown_language_code` rather than being silently dropped
 - `include_availability` adds live Internet Archive borrow/read status (~200ms latency), off by default; flags Open Library leaves out are omitted rather than reported as `false`, and `availability: null` means none was returned for the work
-- Returns work-level records with edition counts, cover IDs, subjects, and Internet Archive identifiers; `content[]` text caps Internet Archive IDs and subjects at 5 each per work, `structuredContent` carries every one
+- Returns work-level records with edition counts, cover IDs, subjects, and Internet Archive identifiers
+- Optional `matching_edition` and `matching_edition_count` preserve the Search API's selected edition and matching count. The selected edition is provider-ranked; it does not prove that every unfielded search term matches that edition
+- `invalid_search_query` reports upstream HTTP 422 validation with recovery guidance; empty queries with specific filters remain supported
 
 ---
 
@@ -68,7 +76,6 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 - Fetch by Open Library Work ID (OL…W), optionally `/works/`-prefixed; anything else — an ISBN, an edition or author OLID — fails input validation before any request, naming `openlibrary_get_edition` (`id_type: "isbn"`) as the route from an ISBN to its work
 - Returns title, description, subjects (plus place/time/people breakdowns), cover IDs, and author IDs — no author names (use `openlibrary_get_author` or `openlibrary_search_books`)
 - A merged work ID stays reachable — the redirect chain is followed to the canonical record, `work_id` reports the canonical ID, and an enrichment notice names both IDs when they differ
-- `content[]` text caps subjects at 10; `structuredContent` carries the complete list
 - `not_found` when the Work ID doesn't exist or its redirect chain reaches no work
 
 ---
@@ -77,7 +84,7 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 
 - List editions of a work by Work ID (OL…W), optionally `/works/`-prefixed; 1–100 per page (default 10), offset pagination, with the requested `offset` echoed in the output
 - Same `work_id` validation as `openlibrary_get_work` — an ISBN resolves to its work through `openlibrary_get_edition` (`id_type: "isbn"`)
-- Returns ISBN-10/13, publisher, language, page count, cover IDs, and edition OLIDs (OL…M) per edition
+- Returns ISBN-10/13, publishers, languages, page count, cover IDs, and edition OLIDs (OL…M), plus `physical_format` and `edition_name` when recorded
 - A merged work ID stays reachable — the editions of the canonical work come back under its ID in `work_id`, with an enrichment notice naming both IDs; a live work still costs one request
 - `not_found` when the Work ID doesn't exist or its redirect chain reaches no work
 
@@ -85,11 +92,12 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 
 ### `openlibrary_get_edition` <sub>tool</sub>
 
-- Resolves 1–50 identifiers per call in a single upstream request — every identifier shares one `id_type`: `isbn` (10 or 13 digits, an ISBN-10 may end in an `X` check digit), `oclc` (numeric), `lccn` (unchecked), or `olid` (OL…M)
+- Accepts 1–1,000 input strings, deduplicates exact strings, and processes the first 50 distinct identifiers in one upstream batch; the remainder is returned as `unprocessed` for resubmission. Every identifier shares one `id_type`: `isbn` (10 or 13 digits, an ISBN-10 may end in an `X` check digit), `oclc` (numeric), `lccn` (unchecked), or `olid` (OL…M). With `OPENLIBRARY_CLAMP_LIMITS=false`, the input array is limited to 50 entries
 - Partial success: identifiers that resolve return in `editions` (request order); the rest land in `unresolved` with `invalid_identifier` (malformed, never sent upstream) or `not_found` (well-formed, no record) — the call fails only when nothing resolves
 - `upstream_unavailable` (retryable) when Open Library's batch lookup itself fails — an HTTP error status other than a rate limit, or an HTML page — so an upstream outage never reads as a missing edition
 - Authors come inline — the edition's own credits, or ones marked `source: "work"` recovered from the parent work when the edition itself lists none; if those lookups fail, the batch still returns, and an enrichment notice names the editions whose authors are missing or shown by ID
-- Returns ISBN-10/13, OCLC, LCCN, LC call numbers, publisher, language, page count, cover IDs, parent work ID, and an Internet Archive `ebook_url` when one exists
+- Returns ISBN-10/13, OCLC, LCCN, LC call numbers, publishers, all cataloged `languages`, page count, cover IDs, parent work ID, and an Internet Archive `ebook_url` when one exists. The singular `language` remains the first cataloged language; `physical_format` and `edition_name` preserve the catalog's wording when present
+- If no processed identifier resolves, the existing typed error also carries every `unprocessed` identifier in its data and recovery hint
 
 ---
 
@@ -97,7 +105,6 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 
 - Search by name — partial and alternate names match; 1–100 per page (default 10), offset pagination
 - Returns Author ID (OL…A), alternate names, birth/death dates, top work, work count, top subjects, and average rating
-- `content[]` text caps top subjects at 5 per author; `structuredContent` carries the complete list
 
 ---
 
@@ -121,7 +128,8 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 
 ### `openlibrary_get_subject` <sub>tool</sub>
 
-- Subject name is normalized before lookup (lowercased, spaces → underscores), so case and spacing never change the result; 1–100 per page (default 12), offset pagination, with the requested `offset` echoed in the output
+- Subject name is trimmed, lowercased, and normalized from whitespace to underscores; 1–100 per page (default 12), offset pagination, with the requested `offset` echoed in the output
+- Blank input fails as `invalid_subject` before any request
 - Returns canonical subject name, normalized subject key, total work count, and per-work author names, edition count, and cover ID
 - Empty results carry a recovery notice suggesting a different word form, synonym, or broader term — subject tags are user-contributed and inconsistent
 
@@ -133,7 +141,6 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 - Usually takes 10–30 s against the live index, far above the metadata tools — reach for it deliberately, not as a general book search
 - 1–100 results per page (default 10), offset pagination; each result carries a relevance score comparable only within its own result set
 - Results key on Internet Archive `ia_identifier`, not Open Library work IDs — match it against `ia_identifiers` from `openlibrary_search_books` to reach the catalogue record
-- `content[]` text caps snippets at 3 per item; `structuredContent` carries every snippet
 - `upstream_unavailable` (retryable) when the index answers without a result set, so a failed search never reads as "no book contains this"
 
 ---
@@ -142,7 +149,7 @@ Both resources mirror data also available via `openlibrary_get_work` and `openli
 
 - Resolves a cover or author-photo URL from `id` (numeric), `isbn` (10 or 13 digits, an ISBN-10 may end in an `X` check digit), or `olid` (OL…M for `target: "book"`, OL…A for `target: "author"`); `size` is `S`/`M`/`L` (default `M`)
 - Identifiers are validated locally before any request — path separators, `..`, and control characters fail as `invalid_identifier`, and an author lookup by `isbn` fails as `invalid_target`
-- The Covers API always returns HTTP 200 — a missing cover is a 1×1 placeholder GIF, not an error, which is why local validation exists
+- The tool constructs the URL without fetching it; a returned URL does not verify that a cover exists
 - Output URL is ready to embed directly as `![cover](url)`
 
 ---
@@ -165,7 +172,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 Open Library-specific:
 
-- Complete Open Library REST API coverage — Search, Search Inside (full-text), Books, Authors, Subjects, and Covers APIs, plus Internet Archive availability lookups
+- Open Library Search, Search Inside (full-text), Books, Authors, and Subjects APIs, cover URL construction, and Internet Archive availability lookups
 - Work → editions and author → works drill-down, with explicit OLID cross-links between tool outputs
 - Configurable `User-Agent` header (`OPENLIBRARY_USER_AGENT`) identifying the server per Open Library's bot-blocking convention
 - Batch edition resolution — up to 50 ISBN/OCLC/LCCN/OLID identifiers in one upstream call, with per-identifier partial-failure reporting
@@ -176,115 +183,36 @@ Agent-friendly output:
 - Recovery guidance on every empty result — echoes the search criteria and suggests how to broaden a query or which offset to retry
 - Merged-record disclosure — `openlibrary_get_author`, `openlibrary_get_author_works`, `openlibrary_get_work`, and `openlibrary_get_editions` follow merge redirects and surface the canonical ID via an enrichment notice when a requested ID was merged
 - Per-item partial failure — `openlibrary_get_edition` returns resolved editions alongside typed `unresolved` reasons instead of failing the whole batch
-- Text-output caps disclosed via enrichment notices (Internet Archive IDs, subjects, snippets) while `structuredContent` always carries the complete list
+- Complete text and structured output, with clamp and recovery notices preserved on both surfaces
 
 ## Getting started
 
-### Public Hosted Instance
+Add the hosted server to Claude Code — no API key required:
 
-A public instance is available at `https://openlibrary.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "openlibrary-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://openlibrary.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http openlibrary-mcp-server https://openlibrary.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "openlibrary-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/openlibrary-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add openlibrary-mcp-server -- npx -y @cyanheads/openlibrary-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "openlibrary-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/openlibrary-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/openlibrary-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "openlibrary-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/openlibrary-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js ≥ 24.0.0).
-- No API key required — Open Library is a free, public API.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/openlibrary-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd openlibrary-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment (optional):**
-
-```sh
-cp .env.example .env
-# edit .env to override defaults — no required vars
-```
+For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -301,6 +229,7 @@ cp .env.example .env
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `OPENLIBRARY_USER_AGENT` | User-Agent sent with all Open Library API requests. Include a contact email per community convention. | `openlibrary-mcp-server casey@caseyjhand.com` |
+| `OPENLIBRARY_CLAMP_LIMITS` | Clamp page limits to 100 and process the first 50 distinct edition identifiers, returning the remainder. `false` restores strict input bounds of 100 rows and 50 raw identifiers. | `true` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
@@ -308,6 +237,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ## Running the server
 
 ### Local development
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js ≥ 24.0.0).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/openlibrary-mcp-server.git
+  cd openlibrary-mcp-server && bun install
+  cp .env.example .env   # optional overrides; no required variables
+  ```
 
 - **Build and run the production version:**
 
@@ -332,11 +271,10 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ### Docker
 
 ```sh
-docker build -t openlibrary-mcp-server .
-docker run --rm -p 3010:3010 openlibrary-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/openlibrary-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/openlibrary-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/openlibrary-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/openlibrary-mcp-server:latest"]`. To build locally, run `docker build -t openlibrary-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
@@ -347,6 +285,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) — ten tools across Search, Books, Authors, Subjects, and Covers. |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`) — Work and Author. |
 | `src/services/open-library` | Open Library service layer — API client and domain types. |
+| `skills/` | Published agent guidance, also served through MCP skill discovery. |
 | `tests/` | Unit and integration tests mirroring the `src/` structure. |
 
 ## Development guide

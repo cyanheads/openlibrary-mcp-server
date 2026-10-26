@@ -4,7 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
 export const openlibraryAuthorResource = resource('openlibrary://authors/{author_id}', {
@@ -40,10 +40,20 @@ export const openlibraryAuthorResource = resource('openlibrary://authors/{author
       .describe('External identifiers for cross-referencing.'),
   }),
 
+  errors: [
+    {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The requested author does not exist on Open Library.',
+      recovery: 'Verify the Author ID or find an author with openlibrary_search_authors and retry.',
+    },
+  ],
+
   async handler(params, ctx) {
     ctx.log.info('Fetching author resource', { author_id: params.author_id });
     const result = await getOpenLibraryService().getAuthor(params.author_id, ctx);
-    if (!result) throw notFound(`Author ${params.author_id} not found on Open Library.`);
+    if (!result)
+      throw ctx.fail('not_found', `Author ${params.author_id} not found on Open Library.`);
     return result;
   },
 });

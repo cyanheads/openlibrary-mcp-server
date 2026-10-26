@@ -19,8 +19,8 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     expect(() => openlibrarySearchAuthors.input.parse({ query: 'tolkien', limit: 0 })).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() => openlibrarySearchAuthors.input.parse({ query: 'tolkien', limit: 101 })).toThrow();
+  it('accepts a limit above 100 for clamping', () => {
+    expect(openlibrarySearchAuthors.input.parse({ query: 'tolkien', limit: 101 }).limit).toBe(101);
   });
 
   it('rejects negative offset', () => {
@@ -105,7 +105,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     expect(text).not.toContain('undefined');
   });
 
-  it('caps top subjects in text and discloses the omitted count, keeping the full array', async () => {
+  it('renders every top subject without an obsolete cap notice', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -126,18 +126,17 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     // structuredContent keeps every top subject.
     expect(result.authors[0]!.top_subjects).toHaveLength(6);
 
-    // The enrichment trailer discloses the cap and true total — previously silent.
+    // Every subject is available to text clients, so there is no cap disclosure.
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toContain('showing 5 of 6');
-    expect(enrichment.notice).toContain('structuredContent');
+    expect(enrichment.notice).toBeUndefined();
 
-    // format() still caps the text at 5 — the 6th subject is omitted from content[].
+    // The final subject must survive the text rendering too.
     const text = (openlibrarySearchAuthors.format!(result)[0] as { text: string }).text;
     expect(text).toContain('Subject5');
-    expect(text).not.toContain('Subject6');
+    expect(text).toContain('Subject6');
   });
 
-  it('does not disclose top-subject capping at exactly the cap (boundary)', async () => {
+  it('renders five subjects without a cap notice', async () => {
     const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
     const svc = (
       await import('@/services/open-library/open-library-service.js')
@@ -155,7 +154,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     const input = openlibrarySearchAuthors.input.parse({ query: 'boundary' });
     await openlibrarySearchAuthors.handler(input, ctx);
 
-    // Exactly 5 subjects, cap 5 — nothing omitted, so no truncation disclosure.
+    // A complete list needs no truncation disclosure.
     expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 

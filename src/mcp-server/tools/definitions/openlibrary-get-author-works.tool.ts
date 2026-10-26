@@ -5,7 +5,13 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  applyPaginationLimit,
+  composeNotices,
+  paginationLimit,
+  paginationLimitNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import {
   getOpenLibraryService,
   normalizeAuthorId,
@@ -22,7 +28,9 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
       .describe(
         'Open Library Author ID (OL…A). A leading "/authors/" prefix is stripped if provided.',
       ),
-    limit: z.number().int().min(1).max(100).default(20).describe('Max works to return.'),
+    limit: paginationLimit(20).describe(
+      'Max works to return; values above 100 apply 100 when limit clamping is enabled.',
+    ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
   output: z.object({
@@ -60,7 +68,7 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     notice: z
       .string()
       .optional()
-      .describe('Set when the requested author ID was merged into a different canonical ID.'),
+      .describe('Guidance for a merged author ID or a requested limit above the page ceiling.'),
   },
   errors: [
     {
@@ -75,7 +83,8 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   async handler(input, ctx) {
     ctx.log.info('Fetching author works', { author_id: input.author_id, limit: input.limit });
     const svc = getOpenLibraryService();
-    const result = await svc.getAuthorWorks(input.author_id, input.limit, input.offset, ctx);
+    const limit = applyPaginationLimit(input.limit, 'openlibrary_get_author_works', ctx);
+    const result = await svc.getAuthorWorks(input.author_id, limit, input.offset, ctx);
     if (!result) {
       throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
     }
@@ -86,11 +95,13 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     // here or not at all — and only when the IDs actually differ, since an
     // unconditional call would render an empty notice on every ordinary lookup.
     const requested = normalizeAuthorId(input.author_id);
-    if (result.author_id !== requested) {
-      ctx.enrich.notice(
-        `${requested} is a merged record; these are the works of ${result.author_id}. Use ${result.author_id} for further lookups.`,
-      );
-    }
+    const notice = composeNotices(
+      paginationLimitNotice(input.limit, input.offset, result.works.length),
+      result.author_id !== requested
+        ? `${requested} is a merged record; these are the works of ${result.author_id}. Use ${result.author_id} for further lookups.`
+        : undefined,
+    );
+    if (notice) ctx.enrich.notice(notice);
     // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
     return { ...result, offset: input.offset };
   },
@@ -98,15 +109,17 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `**Author ID:** ${result.author_id} | **Total works:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.works.length}`,
+      `**Author ID:** ${escapeMarkdownInline(result.author_id)} | **Total works:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.works.length}`,
     );
 
     for (const work of result.works) {
       lines.push('');
-      lines.push(`### ${work.title || NO_TITLE}`);
-      lines.push(`**Work ID:** ${work.work_id}`);
-      if (work.first_publish_date) lines.push(`**First published:** ${work.first_publish_date}`);
-      if (work.cover_ids.length) lines.push(`**Cover IDs:** ${work.cover_ids.join(', ')}`);
+      lines.push('### Work');
+      lines.push(`**Title:** ${escapeMarkdownInline(work.title)}`);
+      lines.push(`**Work ID:** ${escapeMarkdownInline(work.work_id)}`);
+      if (work.first_publish_date !== undefined)
+        lines.push(`**First published:** ${escapeMarkdownInline(work.first_publish_date)}`);
+      lines.push(`**Cover IDs:** ${work.cover_ids.length ? work.cover_ids.join(', ') : '[]'}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

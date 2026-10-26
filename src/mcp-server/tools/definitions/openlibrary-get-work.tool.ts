@@ -5,19 +5,13 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import { WORK_ID_MESSAGE, WORK_ID_PATTERN } from '@/mcp-server/tools/work-id.js';
 import {
   getOpenLibraryService,
   normalizeWorkId,
 } from '@/services/open-library/open-library-service.js';
-
-/**
- * Max subject tags rendered in the `content[]` text. `structuredContent` always
- * carries the complete `subjects` array; only the human-facing text is capped,
- * with the omitted count disclosed via the enrichment trailer.
- */
-const SUBJECTS_TEXT_CAP = 10;
 
 export const openlibraryGetWork = tool('openlibrary_get_work', {
   title: 'Get Work',
@@ -72,13 +66,13 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
     },
   ],
 
-  /** Agent-facing context: merged-ID substitution and subject-cap disclosures. */
+  /** Agent-facing context: merged-ID substitution. */
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Set when the requested work ID was merged into a different canonical ID, and when the text output caps a long subject list (naming the omitted count and the complete array in structuredContent). Absent when neither applies.',
+        'Set when the requested work ID was merged into a different canonical ID. Absent otherwise.',
       ),
   },
 
@@ -90,54 +84,50 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
       throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
     }
 
-    // `notice` is last-wins, so both disclosures are joined into one string.
-    const notices: string[] = [];
     const requested = normalizeWorkId(input.work_id);
     if (result.work_id !== requested) {
-      notices.push(
-        `${requested} is a merged record; this is ${result.work_id}. Use ${result.work_id} for further lookups.`,
+      ctx.enrich.notice(
+        `${escapeMarkdownInline(requested)} is a merged record; this is ${escapeMarkdownInline(result.work_id)}. Use ${escapeMarkdownInline(result.work_id)} for further lookups.`,
       );
     }
-    // Disclose the subjects that format() caps out of the text; structuredContent keeps all.
-    if (result.subjects.length > SUBJECTS_TEXT_CAP) {
-      notices.push(
-        `Subjects are capped at ${SUBJECTS_TEXT_CAP} in text output; showing ${SUBJECTS_TEXT_CAP} of ${result.subjects.length}. The full list is in structuredContent (subjects).`,
-      );
-    }
-    if (notices.length) ctx.enrich.notice(notices.join(' '));
 
     return result;
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`## ${result.title || NO_TITLE}`);
-    lines.push(`**Work ID:** ${result.work_id}`);
-    if (result.description) {
+    lines.push(
+      result.title.includes('\n') || result.title.includes('\r')
+        ? `**Title:** ${escapeMarkdownInline(result.title)}`
+        : `## ${result.title ? escapeMarkdownInline(result.title) : NO_TITLE}`,
+    );
+    if (result.title === '') lines.push('**Title:** ""');
+    lines.push(`**Work ID:** ${escapeMarkdownInline(result.work_id)}`);
+    if (result.description !== undefined) {
       lines.push('');
-      lines.push(result.description);
+      lines.push(`**Description:** ${escapeMarkdownInline(result.description)}`);
     }
-    if (result.author_ids.length) {
-      lines.push('');
-      lines.push(`**Author IDs:** ${result.author_ids.join(', ')}`);
-    }
-    if (result.cover_ids.length) {
-      lines.push(`**Cover IDs:** ${result.cover_ids.join(', ')}`);
-    }
-    if (result.subjects.length) {
-      lines.push(`**Subjects:** ${result.subjects.slice(0, SUBJECTS_TEXT_CAP).join(', ')}`);
-    }
-    if (result.subject_places.length) {
-      lines.push(`**Places:** ${result.subject_places.join(', ')}`);
-    }
-    if (result.subject_times.length) {
-      lines.push(`**Time periods:** ${result.subject_times.join(', ')}`);
-    }
-    if (result.subject_people.length) {
-      lines.push(`**People:** ${result.subject_people.join(', ')}`);
-    }
-    if (result.created) lines.push(`**Created:** ${result.created}`);
-    if (result.last_modified) lines.push(`**Last modified:** ${result.last_modified}`);
+    lines.push('');
+    lines.push(
+      `**Author IDs:** ${result.author_ids.length ? result.author_ids.map(escapeMarkdownInline).join(', ') : '[]'}`,
+    );
+    lines.push(`**Cover IDs:** ${result.cover_ids.length ? result.cover_ids.join(', ') : '[]'}`);
+    lines.push(
+      `**Subjects:** ${result.subjects.length ? result.subjects.map(escapeMarkdownInline).join(', ') : '[]'}`,
+    );
+    lines.push(
+      `**Places:** ${result.subject_places.length ? result.subject_places.map(escapeMarkdownInline).join(', ') : '[]'}`,
+    );
+    lines.push(
+      `**Time periods:** ${result.subject_times.length ? result.subject_times.map(escapeMarkdownInline).join(', ') : '[]'}`,
+    );
+    lines.push(
+      `**People:** ${result.subject_people.length ? result.subject_people.map(escapeMarkdownInline).join(', ') : '[]'}`,
+    );
+    if (result.created !== undefined)
+      lines.push(`**Created:** ${escapeMarkdownInline(result.created)}`);
+    if (result.last_modified !== undefined)
+      lines.push(`**Last modified:** ${escapeMarkdownInline(result.last_modified)}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

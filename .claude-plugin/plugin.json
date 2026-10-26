@@ -12,12 +12,22 @@
   "repository": "https://github.com/cyanheads/openlibrary-mcp-server",
   "license": "Apache-2.0",
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "open-library", "books", "authors", "isbn"],
+  "userConfig": {
+    "clamp_limits": {
+      "type": "boolean",
+      "title": "Clamp oversized requests",
+      "description": "Apply page and identifier batch limits with continuation guidance. Disable to reject oversized requests.",
+      "required": false,
+      "default": true
+    }
+  },
   "mcpServers": {
     "openlibrary-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/openlibrary-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "OPENLIBRARY_CLAMP_LIMITS": "${user_config.clamp_limits}"
       }
     }
   }

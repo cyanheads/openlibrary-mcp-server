@@ -24,6 +24,58 @@ const FULL_WORK = {
 };
 
 describe('openlibraryGetWork', () => {
+  it('renders an empty title explicitly beside the authored heading placeholder', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce({ ...FULL_WORK, title: '' });
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL45804W' });
+    expect(result.structuredContent).toMatchObject({ title: '' });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('## *(no title recorded)*');
+    expect(text).toContain('**Title:** ""');
+  });
+  it('preserves merged-work notice, complete subjects, empty fields and multiline literal values on both surfaces', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const work = {
+      ...FULL_WORK,
+      work_id: 'OL2W',
+      title: '*Title*\n# literal',
+      description: '',
+      created: '',
+      last_modified: '',
+      subject_places: ['<b>Paris</b>'],
+      subjects: Array.from({ length: 12 }, (_, i) => `subject-${i}`),
+    };
+    vi.spyOn(svc, 'getWork').mockResolvedValueOnce(work);
+    const result = await runToolContract(openlibraryGetWork, { work_id: 'OL1W' });
+    expect(result.structuredContent).toMatchObject({
+      ...work,
+      notice: expect.stringContaining('merged record'),
+    });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    for (const value of [
+      '**Title:** \\*Title\\*\\\n\\# literal',
+      'subject-11',
+      '**Description:**',
+      '**Created:**',
+      '**Last modified:**',
+      '\\<b>Paris\\</b>',
+      'merged record',
+    ])
+      expect(text).toContain(value);
+    expect(text).not.toContain('capped');
+    expect(text).not.toContain('## *Title*');
+  });
   beforeEach(() => {
     initOpenLibraryService();
   });
@@ -92,5 +144,7 @@ describe('openlibraryGetWork', () => {
     const text = (openlibraryGetWork.format!(sparse)[0] as { text: string }).text;
     expect(text).toContain('OL1W');
     expect(text).toContain('Sparse');
+    for (const label of ['Author IDs', 'Cover IDs', 'Subjects', 'Places', 'Time periods', 'People'])
+      expect(text).toContain(`**${label}:** []`);
   });
 });

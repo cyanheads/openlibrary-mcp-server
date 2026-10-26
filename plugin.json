@@ -1,0 +1,31 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openlibrary-mcp-server",
+  "version": "0.3.1",
+  "description": "Search books and authors, fetch editions, browse subjects, and resolve cover images from Open Library via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/openlibrary-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/openlibrary-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent",
+    "open-library",
+    "books",
+    "library",
+    "isbn",
+    "authors",
+    "editions",
+    "internet-archive"
+  ]
+}

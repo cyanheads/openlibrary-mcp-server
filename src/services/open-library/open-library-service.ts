@@ -892,8 +892,7 @@ export class OpenLibraryService {
         }),
         edition_count: doc.edition_count ?? 0,
         ...(typeof doc.cover_i === 'number' && { cover_id: doc.cover_i }),
-        // Complete list: the tool caps only the rendered text and discloses the
-        // omitted count, so structuredContent keeps every tag the index returned.
+        // Both response surfaces preserve every subject tag the index returned.
         ...(doc.subject?.length ? { subjects: doc.subject } : {}),
         ebook_access: ebookAccess,
         has_fulltext: doc.has_fulltext ?? false,

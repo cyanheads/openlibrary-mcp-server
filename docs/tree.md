@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 20:37:43
+Generated on: 2026-10-26 07:36:21
 
 ```text
 openlibrary-mcp-server/
@@ -27,6 +27,7 @@ openlibrary-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -39,6 +40,8 @@ openlibrary-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -137,6 +140,9 @@ openlibrary-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── openlibrary-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -159,8 +165,8 @@ openlibrary-mcp-server/
 │   │       │   ├── openlibrary-search-authors.tool.ts
 │   │       │   ├── openlibrary-search-books.tool.ts
 │   │       │   └── openlibrary-search-inside.tool.ts
-│   │       ├── capped-list-notice.ts
 │   │       ├── heading-placeholders.ts
+│   │       ├── limit-policy.ts
 │   │       └── work-id.ts
 │   ├── services/
 │   │   └── open-library/
@@ -174,6 +180,8 @@ openlibrary-mcp-server/
 │   │   ├── openlibrary-author.resource.test.ts
 │   │   ├── openlibrary-resources-edge.test.ts
 │   │   └── openlibrary-work.resource.test.ts
+│   ├── scripts/
+│   │   └── mcpb-packaging.test.ts
 │   ├── security/
 │   │   └── security.test.ts
 │   ├── services/
@@ -181,6 +189,7 @@ openlibrary-mcp-server/
 │   │   └── open-library-service.test.ts
 │   └── tools/
 │       ├── empty-heading-placeholders.tool.test.ts
+│       ├── limit-policy.test.ts
 │       ├── openlibrary-get-author-edge.tool.test.ts
 │       ├── openlibrary-get-author-works-edge.tool.test.ts
 │       ├── openlibrary-get-author-works.tool.test.ts
@@ -217,7 +226,9 @@ openlibrary-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

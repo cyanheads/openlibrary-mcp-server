@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-15
+
+Book search returns work availability again, page limits rise to 1000 rows, editions carry translator and other credits, and blank searches, non-language codes, and lowercase IDs are handled before any request.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-26
 
 Complete catalog responses and edition workflows

@@ -1,6 +1,6 @@
 # openlibrary-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 07:36:21
+Generated on: 2026-11-16 04:46:14
 
 ```text
 openlibrary-mcp-server/
@@ -171,7 +171,9 @@ openlibrary-mcp-server/
 │   ├── services/
 │   │   └── open-library/
 │   │       ├── language-codes.ts
+│   │       ├── language-records.ts
 │   │       ├── open-library-service.ts
+│   │       ├── search-criteria.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
@@ -185,31 +187,34 @@ openlibrary-mcp-server/
 │   ├── security/
 │   │   └── security.test.ts
 │   ├── services/
+│   │   ├── language-codes.test.ts
 │   │   ├── open-library-fetch-policy.test.ts
-│   │   └── open-library-service.test.ts
-│   └── tools/
-│       ├── empty-heading-placeholders.tool.test.ts
-│       ├── limit-policy.test.ts
-│       ├── openlibrary-get-author-edge.tool.test.ts
-│       ├── openlibrary-get-author-works-edge.tool.test.ts
-│       ├── openlibrary-get-author-works.tool.test.ts
-│       ├── openlibrary-get-author.tool.test.ts
-│       ├── openlibrary-get-cover-url-edge.tool.test.ts
-│       ├── openlibrary-get-cover-url.tool.test.ts
-│       ├── openlibrary-get-edition-edge.tool.test.ts
-│       ├── openlibrary-get-edition.tool.test.ts
-│       ├── openlibrary-get-editions-edge.tool.test.ts
-│       ├── openlibrary-get-editions.tool.test.ts
-│       ├── openlibrary-get-subject-edge.tool.test.ts
-│       ├── openlibrary-get-subject.tool.test.ts
-│       ├── openlibrary-get-work-edge.tool.test.ts
-│       ├── openlibrary-get-work.tool.test.ts
-│       ├── openlibrary-search-authors-edge.tool.test.ts
-│       ├── openlibrary-search-authors.tool.test.ts
-│       ├── openlibrary-search-books-edge.tool.test.ts
-│       ├── openlibrary-search-books.tool.test.ts
-│       ├── openlibrary-search-inside.tool.test.ts
-│       └── strict-inputs.tool.test.ts
+│   │   ├── open-library-service.test.ts
+│   │   └── search-criteria.test.ts
+│   ├── tools/
+│   │   ├── empty-heading-placeholders.tool.test.ts
+│   │   ├── limit-policy.test.ts
+│   │   ├── openlibrary-get-author-edge.tool.test.ts
+│   │   ├── openlibrary-get-author-works-edge.tool.test.ts
+│   │   ├── openlibrary-get-author-works.tool.test.ts
+│   │   ├── openlibrary-get-author.tool.test.ts
+│   │   ├── openlibrary-get-cover-url-edge.tool.test.ts
+│   │   ├── openlibrary-get-cover-url.tool.test.ts
+│   │   ├── openlibrary-get-edition-edge.tool.test.ts
+│   │   ├── openlibrary-get-edition.tool.test.ts
+│   │   ├── openlibrary-get-editions-edge.tool.test.ts
+│   │   ├── openlibrary-get-editions.tool.test.ts
+│   │   ├── openlibrary-get-subject-edge.tool.test.ts
+│   │   ├── openlibrary-get-subject.tool.test.ts
+│   │   ├── openlibrary-get-work-edge.tool.test.ts
+│   │   ├── openlibrary-get-work.tool.test.ts
+│   │   ├── openlibrary-search-authors-edge.tool.test.ts
+│   │   ├── openlibrary-search-authors.tool.test.ts
+│   │   ├── openlibrary-search-books-edge.tool.test.ts
+│   │   ├── openlibrary-search-books.tool.test.ts
+│   │   ├── openlibrary-search-inside.tool.test.ts
+│   │   └── strict-inputs.tool.test.ts
+│   └── timing.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

@@ -84,6 +84,7 @@ describe('openlibraryGetAuthorWorks format — empty title', () => {
 
 describe('openlibraryGetEdition format — empty title', () => {
   const edition = {
+    identifier: 'OL7353617M',
     edition_id: 'OL7353617M',
     title: '',
     authors: [],

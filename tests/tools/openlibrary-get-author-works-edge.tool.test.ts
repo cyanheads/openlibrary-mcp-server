@@ -9,6 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetAuthorWorks } from '@/mcp-server/tools/definitions/openlibrary-get-author-works.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
+function contentText(result: { content: unknown[] }): string {
+  return result.content
+    .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+    .join('\n');
+}
+
 describe('openlibraryGetAuthorWorks — edge cases', () => {
   beforeEach(() => {
     initOpenLibraryService();
@@ -22,10 +28,10 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
     ).toThrow();
   });
 
-  it('accepts a limit above 100 for clamping', () => {
-    expect(openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 101 }).limit).toBe(
-      101,
-    );
+  it('accepts a limit above the page ceiling for clamping', () => {
+    expect(
+      openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 1001 }).limit,
+    ).toBe(1001);
   });
 
   it('rejects negative offset', () => {
@@ -41,9 +47,9 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
     expect(input.limit).toBe(1);
   });
 
-  it('accepts limit 100 (maximum)', () => {
-    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 100 });
-    expect(input.limit).toBe(100);
+  it('accepts limit 1000 (page ceiling)', () => {
+    const input = openlibraryGetAuthorWorks.input.parse({ author_id: 'OL24638A', limit: 1000 });
+    expect(input.limit).toBe(1000);
   });
 
   // ─── Not found error contract ────────────────────────────────────────────────
@@ -70,9 +76,7 @@ describe('openlibraryGetAuthorWorks — edge cases', () => {
         },
       },
     });
-    const text = result.content
-      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-      .join('\n');
+    const text = contentText(result);
     expect(text).toContain('not_found');
     expect(text).toContain(
       openlibraryGetAuthorWorks.errors!.find((e) => e.reason === 'not_found')!.recovery,
@@ -181,12 +185,6 @@ describe('openlibraryGetAuthorWorks — offset echo', () => {
     };
   }
 
-  function contentText(result: { content: unknown[] }): string {
-    return result.content
-      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
-      .join('\n');
-  }
-
   /** Routes by URL fragment; anything unrouted 404s as an unknown record does. */
   function route(routes: Record<string, unknown>) {
     return vi.spyOn(globalThis, 'fetch').mockImplementation(((input: unknown) => {
@@ -255,5 +253,58 @@ describe('openlibraryGetAuthorWorks — offset echo', () => {
     expect(structured.offset).toBe(40);
     expect(contentText(result)).toContain('**Offset:** 40 | **Returned:** 2');
     expect(String(fetchSpy.mock.calls.at(-1)?.[0])).toContain('offset=40');
+  });
+
+  // ─── Past-end pages ─────────────────────────────────────────────────────────
+
+  // Open Library can report a `size` above the rows it serves (OL31353A: 271
+  // reported, 270 served), so offset 270 is empty though below the total.
+  it.each([270, 271, 5000])(
+    'discloses an empty page at offset %i on both surfaces without claiming a last offset',
+    async (offset) => {
+      route({ '/authors/OL31353A/works.json': worksPage(271, 0) });
+
+      const result = await runToolContract(openlibraryGetAuthorWorks, {
+        author_id: 'OL31353A',
+        offset,
+      });
+
+      expect(result.isError).toBeFalsy();
+      const notice = `Offset ${offset} is past the end of the result set — 271 works are listed for OL31353A, though Open Library's count can include works it no longer serves, so the list can end before 271. Retry with a lower offset.`;
+      expect(result.structuredContent).toMatchObject({ total: 271, offset, works: [], notice });
+      expect(contentText(result)).toContain(notice);
+      expect(contentText(result)).not.toContain('last offset');
+    },
+  );
+
+  it('adds no past-end notice for an author with no works', async () => {
+    route({ '/authors/OL1A/works.json': worksPage(0, 0) });
+
+    const result = await runToolContract(openlibraryGetAuthorWorks, { author_id: 'OL1A' });
+
+    expect(result.structuredContent).toMatchObject({ total: 0, works: [] });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('composes the past-end notice with the clamp and merged-author notices', async () => {
+    route({
+      '/authors/OL2162284A.json': {
+        key: '/authors/OL2162284A',
+        type: { key: '/type/redirect' },
+        location: '/authors/OL19981A',
+      },
+      '/authors/OL19981A.json': { key: '/authors/OL19981A', type: { key: '/type/author' } },
+      '/authors/OL19981A/works.json': worksPage(900, 0),
+    });
+
+    const result = await runToolContract(openlibraryGetAuthorWorks, {
+      author_id: 'OL2162284A',
+      limit: 1001,
+      offset: 900,
+    });
+
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      "Offset 900 is past the end of the result set — 900 works are listed for OL19981A, though Open Library's count can include works it no longer serves, so the list can end before 900. Retry with a lower offset. Requested limit 1001; applied limit 1000. OL2162284A is a merged record; these are the works of OL19981A. Use OL19981A for further lookups.",
+    );
   });
 });

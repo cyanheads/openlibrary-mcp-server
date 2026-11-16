@@ -3,6 +3,7 @@
  * @module tests/tools/openlibrary-get-edition-edge.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,7 @@ import {
 } from '@/services/open-library/open-library-service.js';
 
 const FULL_EDITION = {
+  identifier: 'OL7353617M',
   edition_id: 'OL7353617M',
   title: 'The Great Gatsby',
   authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A', source: 'edition' as const }],
@@ -87,7 +89,7 @@ describe('openlibraryGetEdition — edge cases', () => {
       unprocessed: ['OL51M', 'OL52M'],
       notice: expect.stringContaining('53 requested'),
     });
-    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    const text = textOf(result);
     for (const value of ['OL51M', 'OL52M', '52 distinct', '50 processed', 'Author lookups'])
       expect(text).toContain(value);
   });
@@ -122,7 +124,7 @@ describe('openlibraryGetEdition — edge cases', () => {
           },
         },
       });
-      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      const text = textOf(result);
       expect(text).toContain('Unprocessed identifier 1: remaining \\*value\\*\\\nnext');
       expect(text).toContain('Unprocessed identifier 2: ""');
       expect(spy).toHaveBeenCalledTimes(reason === 'invalid_identifier' ? 0 : 1);
@@ -170,7 +172,7 @@ describe('openlibraryGetEdition — edge cases', () => {
       id_type: 'olid',
     });
     expect(result.structuredContent).toMatchObject({ editions: [edition] });
-    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    const text = textOf(result);
     expect(text).toContain(`**Title:** ${escapeMarkdownInline(edition.title)}`);
     expect(text).toContain(escapeMarkdownInline(edition.description));
     expect(text).toContain(escapeMarkdownInline(edition.authors[0]!.name));
@@ -210,6 +212,61 @@ describe('openlibraryGetEdition — edge cases', () => {
     const text = JSON.stringify(result.content);
     for (const value of ['eng', 'chi', 'paperback', 'Second Dell printing'])
       expect(text).toContain(value);
+  });
+
+  it('returns edition credits on both surfaces and renders none that are absent', async () => {
+    const credited = {
+      ...FULL_EDITION,
+      subtitle: 'A *novel*',
+      by_statement: 'Translated by Richard Pevear and Larissa Volokhonsky',
+      contributors: [
+        { name: 'Richard Pevear', role: 'Translator' },
+        { name: 'Larissa Volokhonsky' },
+      ],
+      contributions: ['Pevear, Richard, 1943-, translator', 'Larissa Volokhonsky (Translator)'],
+      translated_from: ['rus'],
+    };
+    // Taken before the call: the stub hands `credited` itself to the handler.
+    const expected = structuredClone(credited);
+    const bare = { ...FULL_EDITION, identifier: 'OL1M', edition_id: 'OL1M', title: 'Bare' };
+    vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [credited, bare],
+      unresolved: [],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['OL7353617M', 'OL1M'],
+      id_type: 'olid',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetEdition.output.parse(result.structuredContent);
+    expect(structured.editions[0]).toEqual(expected);
+    for (const field of [
+      'subtitle',
+      'by_statement',
+      'contributors',
+      'contributions',
+      'translated_from',
+    ])
+      expect(structured.editions[1]).not.toHaveProperty(field);
+    const text = textOf(result);
+    const [first, second] = text.split('## Bare');
+    for (const line of [
+      `**Subtitle:** ${escapeMarkdownInline('A *novel*')}`,
+      '**By statement:** Translated by Richard Pevear and Larissa Volokhonsky',
+      '**Contributors:** Richard Pevear (Translator); Larissa Volokhonsky',
+      '**Contributions:** Pevear, Richard, 1943-, translator; Larissa Volokhonsky (Translator)',
+      '**Translated from:** rus',
+    ])
+      expect(first).toContain(line);
+    for (const label of [
+      'Subtitle',
+      'By statement',
+      'Contributors',
+      'Contributions',
+      'Translated from',
+    ])
+      expect(second).not.toContain(`**${label}:**`);
   });
 
   // ─── ISBN validation ────────────────────────────────────────────────────────
@@ -347,6 +404,7 @@ describe('openlibraryGetEdition — edge cases', () => {
 
   it('format output does not contain null or undefined strings', () => {
     const sparse = {
+      identifier: 'OL1M',
       edition_id: 'OL1M',
       title: 'Sparse',
       authors: [],
@@ -411,6 +469,234 @@ describe('openlibraryGetEdition — edge cases', () => {
         unprocessed: [],
       });
       expect(result.structuredContent).not.toHaveProperty('notice');
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+});
+
+/** OL20525469M answers both ISBNs of one book, though its own isbn_13 is empty. */
+const LEFT_HAND = {
+  key: '/books/OL20525469M',
+  title: 'The Left Hand of Darkness',
+  isbn_10: ['0441478123'],
+  authors: [{ key: '/authors/OL31353A', name: 'Ursula K. Le Guin' }],
+};
+
+const PEVEAR = {
+  key: '/books/OL7361482M',
+  title: 'Anna Karenina',
+  isbn_13: ['9780143035008'],
+  authors: [{ key: '/authors/OL26783A', name: 'Leo Tolstoy' }],
+};
+
+/** Answers the bibkeys route from `map`, and fails any other request. */
+function mockBibkeys(map: Record<string, unknown>) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(((input: unknown) => {
+    const url = input instanceof Request ? input.url : String(input);
+    return url.includes('/api/books.json')
+      ? Promise.resolve(new Response(JSON.stringify(map), { status: 200 }))
+      : Promise.reject(new Error(`unmocked fetch: ${url}`));
+  }) as typeof globalThis.fetch);
+}
+
+function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+  return result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+}
+
+describe('openlibraryGetEdition — blank identifiers', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    initOpenLibraryService();
+  });
+
+  // The bibkeys route answers `LCCN:` with a record whose lccn is [""] — an
+  // unrelated edition — so a blank value must never be sent.
+  it('fails a blank LCCN as invalid_identifier instead of resolving an unrelated edition', async () => {
+    const fetchSpy = mockBibkeys({
+      'LCCN:': { details: { key: '/books/OL7254001M', title: 'Unrelated', lccn: [''] } },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: [''],
+      id_type: 'lccn',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'invalid_identifier' } },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    (['isbn', 'oclc', 'olid'] as const).flatMap((idType) =>
+      ['', '\t \n'].map((blank) => [idType, JSON.stringify(blank), blank] as const),
+    ),
+  )(
+    'fails a blank %s identifier (%s) as invalid_identifier, on both surfaces',
+    async (idType, _label, blank) => {
+      const fetchSpy = mockBibkeys({});
+      const result = await runToolContract(openlibraryGetEdition, {
+        identifiers: [blank],
+        id_type: idType,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'invalid_identifier',
+            recovery: {
+              hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'invalid_identifier')!
+                .recovery,
+            },
+          },
+        },
+      });
+      expect(textOf(result)).toContain(
+        `None of the 1 supplied identifiers are valid for id_type "${idType}".`,
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(
+    (['isbn', 'oclc', 'lccn', 'olid'] as const).flatMap((idType) =>
+      ['', ' ', '\t \n'].map((blank) => [idType, JSON.stringify(blank), blank] as const),
+    ),
+  )('never sends a blank %s identifier (%s) upstream', async (idType, _label, blank) => {
+    expect(await identifiersSentUpstream(blank, idType)).toEqual([]);
+  });
+
+  it('reports each blank entry per entry and sends the rest of the batch unchanged', async () => {
+    const spy = vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValue({
+      editions: [{ ...FULL_EDITION, identifier: ' 00027665 ' }],
+      unresolved: [],
+      authorGaps: { failed: [], skipped: [] },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['', ' 00027665 ', '  '],
+      id_type: 'lccn',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(spy.mock.calls[0]![0]).toEqual([' 00027665 ']);
+    expect(result.structuredContent).toMatchObject({
+      unresolved: [
+        { identifier: '', reason: 'invalid_identifier' },
+        { identifier: '  ', reason: 'invalid_identifier' },
+      ],
+    });
+    const text = textOf(result);
+    expect(text).toContain('- "" — invalid_identifier');
+  });
+
+  it('fails an all-blank batch as invalid_identifier with the declared recovery', async () => {
+    const fetchSpy = mockBibkeys({});
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['', '   '],
+      id_type: 'lccn',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_identifier',
+          recovery: {
+            hint: openlibraryGetEdition.errors!.find((e) => e.reason === 'invalid_identifier')!
+              .recovery,
+          },
+        },
+      },
+    });
+    expect(textOf(result)).toContain(
+      'None of the 2 supplied identifiers are valid for id_type "lccn".',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('openlibraryGetEdition — requested identifier echo', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    initOpenLibraryService();
+  });
+
+  it('echoes each resolved input on both surfaces in a mixed batch, leaving unresolved and unprocessed unchanged', async () => {
+    mockBibkeys({
+      'ISBN:9780441478125': { details: LEFT_HAND },
+      'ISBN:0441478123': { details: LEFT_HAND },
+      'ISBN:9780143035008': { details: PEVEAR },
+    });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['9999999999', '9780441478125', 'abc', '978-0-14-303500-8', '0441478123'],
+      id_type: 'isbn',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetEdition.output.parse(result.structuredContent);
+    expect(structured.editions.map((e) => [e.identifier, e.edition_id])).toEqual([
+      ['9780441478125', 'OL20525469M'],
+      ['978-0-14-303500-8', 'OL7361482M'],
+      ['0441478123', 'OL20525469M'],
+    ]);
+    expect(structured.unresolved).toEqual([
+      { identifier: 'abc', reason: 'invalid_identifier' },
+      { identifier: '9999999999', reason: 'not_found' },
+    ]);
+    expect(structured.unprocessed).toEqual([]);
+    const text = textOf(result);
+    for (const [title, identifier] of [
+      ['The Left Hand of Darkness', '9780441478125'],
+      ['Anna Karenina', '978-0-14-303500-8'],
+      ['The Left Hand of Darkness', '0441478123'],
+    ])
+      expect(text).toContain(`## ${title}\n**Identifier:** ${escapeMarkdownInline(identifier!)}\n`);
+    expect(text.match(/\*\*Identifier:\*\*/g)).toHaveLength(3);
+  });
+
+  it('echoes a lowercase OLID as supplied', async () => {
+    mockBibkeys({ 'OLID:ol7361482m': { details: PEVEAR } });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['ol7361482m'],
+      id_type: 'olid',
+    });
+    expect(result.structuredContent).toMatchObject({
+      editions: [{ identifier: 'ol7361482m', edition_id: 'OL7361482M' }],
+    });
+    expect(textOf(result)).toContain('**Identifier:** ol7361482m');
+  });
+
+  it('collapses an exact duplicate to one echoed row with clamping enabled', async () => {
+    const fetchSpy = mockBibkeys({ 'ISBN:9780143035008': { details: PEVEAR } });
+    const result = await runToolContract(openlibraryGetEdition, {
+      identifiers: ['9780143035008', '9780143035008'],
+      id_type: 'isbn',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const structured = openlibraryGetEdition.output.parse(result.structuredContent);
+    expect(structured.editions.map((e) => e.identifier)).toEqual(['9780143035008']);
+  });
+
+  it('keeps one echoed row per exact duplicate with clamping disabled', async () => {
+    vi.stubEnv('OPENLIBRARY_CLAMP_LIMITS', 'false');
+    vi.resetModules();
+    try {
+      const { openlibraryGetEdition: strict } = await import(
+        '@/mcp-server/tools/definitions/openlibrary-get-edition.tool.js'
+      );
+      const service = await import('@/services/open-library/open-library-service.js');
+      service.initOpenLibraryService();
+      mockBibkeys({ 'ISBN:9780143035008': { details: PEVEAR } });
+      const result = await runToolContract(strict, {
+        identifiers: ['9780143035008', '9780143035008'],
+        id_type: 'isbn',
+      });
+      const structured = strict.output.parse(result.structuredContent);
+      expect(structured.editions.map((e) => [e.identifier, e.edition_id])).toEqual([
+        ['9780143035008', 'OL7361482M'],
+        ['9780143035008', 'OL7361482M'],
+      ]);
+      expect(textOf(result).match(/\*\*Identifier:\*\* 9780143035008/g)).toHaveLength(2);
     } finally {
       vi.unstubAllEnvs();
       vi.resetModules();

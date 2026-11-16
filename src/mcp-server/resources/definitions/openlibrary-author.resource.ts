@@ -14,7 +14,7 @@ export const openlibraryAuthorResource = resource('openlibrary://authors/{author
     'Author detail by Open Library Author ID (OL…A). Provides name, bio, dates, photo IDs, and linked external identifiers as injectable context for a conversation about a specific author.',
   mimeType: 'application/json',
   params: z.object({
-    author_id: z.string().describe('Open Library Author ID (e.g., OL24638A).'),
+    author_id: z.string().describe('Open Library Author ID (e.g., OL24638A), in any case.'),
   }),
   output: z.object({
     author_id: z

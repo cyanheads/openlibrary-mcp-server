@@ -38,9 +38,21 @@ export const openlibraryGetWork = tool('openlibrary_get_work', {
       .optional()
       .describe('Work description or blurb. Absent when not provided.'),
     subjects: z.array(z.string()).describe('Subject tags for this work.'),
-    subject_places: z.array(z.string()).describe('Geographic subjects.'),
-    subject_times: z.array(z.string()).describe('Time period subjects.'),
-    subject_people: z.array(z.string()).describe('People subjects.'),
+    subject_places: z
+      .array(z.string())
+      .describe(
+        'Geographic subjects. Browse one with openlibrary_get_subject as "place:<value>", the value verbatim.',
+      ),
+    subject_times: z
+      .array(z.string())
+      .describe(
+        'Time period subjects. Browse one with openlibrary_get_subject as "time:<value>", the value verbatim.',
+      ),
+    subject_people: z
+      .array(z.string())
+      .describe(
+        'People subjects. Browse one with openlibrary_get_subject as "person:<value>", the value verbatim.',
+      ),
     cover_ids: z
       .array(z.number())
       .describe('Numeric cover IDs. Pass to openlibrary_get_cover_url with id_type "id".'),

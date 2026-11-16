@@ -147,4 +147,14 @@ describe('openlibraryGetWork', () => {
     for (const label of ['Author IDs', 'Cover IDs', 'Subjects', 'Places', 'Time periods', 'People'])
       expect(text).toContain(`**${label}:** []`);
   });
+
+  it.each([
+    ['subject_places', 'place:'],
+    ['subject_people', 'person:'],
+    ['subject_times', 'time:'],
+  ] as const)('points %s to openlibrary_get_subject with %s', (field, prefix) => {
+    const description = openlibraryGetWork.output.shape[field].description;
+    expect(description).toContain('openlibrary_get_subject');
+    expect(description).toContain(`"${prefix}<value>"`);
+  });
 });

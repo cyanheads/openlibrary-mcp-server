@@ -86,13 +86,81 @@ describe('openlibraryGetEditions — edge cases', () => {
     expect(JSON.stringify(result.content)).toContain('Second Dell printing');
   });
 
+  it('returns edition credits on both surfaces and renders none that are absent', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const credited = {
+      edition_id: 'OL7361482M',
+      title: 'Anna Karenina',
+      subtitle: 'A *novel*',
+      by_statement: 'Translated by Richard Pevear and Larissa Volokhonsky',
+      contributors: [
+        { name: 'Richard Pevear', role: 'Translator' },
+        { name: 'Larissa Volokhonsky' },
+      ],
+      contributions: ['Pevear, Richard, 1943-, translator', 'Larissa Volokhonsky (Translator)'],
+      translated_from: ['rus'],
+      publishers: [],
+      languages: ['eng'],
+      isbn_10: [],
+      isbn_13: ['9780143035008'],
+      cover_ids: [],
+    };
+    // Taken before the call: the stub hands `credited` itself to the handler.
+    const expected = structuredClone(credited);
+    const bare = {
+      edition_id: 'OL1M',
+      title: 'Bare',
+      publishers: [],
+      languages: [],
+      isbn_10: [],
+      isbn_13: [],
+      cover_ids: [],
+    };
+    vi.spyOn(svc, 'getEditions').mockResolvedValue({
+      total: 2,
+      work_id: 'OL267096W',
+      editions: [credited, bare],
+    });
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL267096W' });
+    expect(result.isError).toBeFalsy();
+    const structured = openlibraryGetEditions.output.parse(result.structuredContent);
+    expect(structured.editions[0]).toEqual(expected);
+    for (const field of [
+      'subtitle',
+      'by_statement',
+      'contributors',
+      'contributions',
+      'translated_from',
+    ])
+      expect(structured.editions[1]).not.toHaveProperty(field);
+    const [first, second] = contentText(result).split('### Bare');
+    for (const line of [
+      `**Subtitle:** ${escapeMarkdownInline('A *novel*')}`,
+      '**By statement:** Translated by Richard Pevear and Larissa Volokhonsky',
+      '**Contributors:** Richard Pevear (Translator); Larissa Volokhonsky',
+      '**Contributions:** Pevear, Richard, 1943-, translator; Larissa Volokhonsky (Translator)',
+      '**Translated from:** rus',
+    ])
+      expect(first).toContain(line);
+    for (const label of [
+      'Subtitle',
+      'By statement',
+      'Contributors',
+      'Contributions',
+      'Translated from',
+    ])
+      expect(second).not.toContain(`**${label}:**`);
+  });
+
   // ─── Input validation ───────────────────────────────────────────────────────
 
   it('rejects limit below 1', () => {
     expect(() => openlibraryGetEditions.input.parse({ work_id: 'OL45804W', limit: 0 })).toThrow();
   });
 
-  it('accepts limit above 100 for clamping', () => {
+  it('accepts a limit above the page ceiling for clamping', () => {
     expect(openlibraryGetEditions.input.parse({ work_id: 'OL45804W', limit: 101 }).limit).toBe(101);
   });
 
@@ -102,22 +170,62 @@ describe('openlibraryGetEditions — edge cases', () => {
     ).getOpenLibraryService();
     const spy = vi
       .spyOn(svc, 'getEditions')
-      .mockResolvedValue({ total: 200, work_id: 'OL2W', editions: [] });
+      .mockResolvedValue({ total: 2000, work_id: 'OL2W', editions: [] });
     const result = await runToolContract(openlibraryGetEditions, {
       work_id: 'OL1W',
-      limit: 101,
+      limit: 1001,
       offset: 999,
     });
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]!.slice(0, 3)).toEqual(['OL1W', 100, 999]);
+    expect(spy.mock.calls[0]!.slice(0, 3)).toEqual(['OL1W', 1000, 999]);
     expect(result.structuredContent).toMatchObject({
-      total: 200,
+      total: 2000,
       offset: 999,
       notice: expect.stringContaining('merged record'),
     });
+    expect(result.structuredContent).toMatchObject({
+      notice: expect.not.stringContaining('past the end'),
+    });
     expect(contentText(result)).toContain(
-      'Requested limit 101; applied limit 100. Next offset: 999.',
+      'Requested limit 1001; applied limit 1000. Next offset: 999.',
     );
+  });
+
+  it('applies a limit at the 1000 ceiling with no clamp notice', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi
+      .spyOn(svc, 'getEditions')
+      .mockResolvedValue({ total: 6116, work_id: 'OL17732W', editions: [] });
+    const result = await runToolContract(openlibraryGetEditions, {
+      work_id: 'OL17732W',
+      limit: 1000,
+    });
+    expect(spy.mock.calls[0]!.slice(0, 3)).toEqual(['OL17732W', 1000, 0]);
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('names the 1000 ceiling in the limit description', () => {
+    expect(openlibraryGetEditions.input.shape.limit.description).toContain(
+      'values above 1000 apply 1000',
+    );
+  });
+
+  it('composes the merged-ID, clamp, and past-end notices in one enrichment notice', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getEditions').mockResolvedValue({ total: 3, work_id: 'OL2W', editions: [] });
+    const result = await runToolContract(openlibraryGetEditions, {
+      work_id: 'OL1W',
+      limit: 1001,
+      offset: 10,
+    });
+    const expected =
+      'OL1W is a merged record; these are the editions of OL2W. Use OL2W for further lookups. Requested limit 1001; applied limit 1000. Offset 10 is past the end of the result set — 3 editions belong to OL2W, so the last offset that returns a result is 2. Retry with a lower offset.';
+    expect(result.structuredContent).toMatchObject({ total: 3, offset: 10, notice: expected });
+    expect(contentText(result)).toContain(expected);
   });
 
   it('renders multiline metadata, present empty publication and parent work, and zero pages literally', async () => {
@@ -404,5 +512,59 @@ describe('openlibraryGetEditions — offset echo', () => {
     expect(contentText(result)).toContain(
       `**Work ID:** OL893414W | **Total editions:** 155 | **Offset:** ${expected} | **Returned:** ${returned}`,
     );
+  });
+});
+
+describe('openlibraryGetEditions — past-end notice', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [
+      'offset 5000 of 161',
+      161,
+      5000,
+      'Offset 5000 is past the end of the result set — 161 editions belong to OL45804W, so the last offset that returns a result is 160. Retry with a lower offset.',
+    ],
+    [
+      'the offset equal to the total',
+      161,
+      161,
+      'Offset 161 is past the end of the result set — 161 editions belong to OL45804W, so the last offset that returns a result is 160. Retry with a lower offset.',
+    ],
+    [
+      'offset 1 of a single edition',
+      1,
+      1,
+      'Offset 1 is past the end of the result set — 1 edition belongs to OL45804W, so the last offset that returns a result is 0. Retry with a lower offset.',
+    ],
+  ])('discloses %s on both surfaces', async (_label, total, offset, notice) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(editionsPage(total, 0));
+
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL45804W', offset });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ total, offset, editions: [], notice });
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it.each([
+    ['the last offset that returns a result', 161, 160, 1],
+    ['a work with no editions', 0, 0, 0],
+  ])('adds no notice at %s', async (_label, total, offset, returned) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(editionsPage(total, returned));
+
+    const result = await runToolContract(openlibraryGetEditions, { work_id: 'OL45804W', offset });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ total, offset });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('past the end');
   });
 });

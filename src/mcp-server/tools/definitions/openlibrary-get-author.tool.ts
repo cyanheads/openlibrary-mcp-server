@@ -20,7 +20,7 @@ export const openlibraryGetAuthor = tool('openlibrary_get_author', {
     author_id: z
       .string()
       .describe(
-        'Open Library Author ID. Format: OL…A (e.g., "OL24638A"). A leading "/authors/" prefix is stripped if provided.',
+        'Open Library Author ID. Format: OL…A (e.g., "OL24638A"), in any case. A leading "/authors/" prefix is stripped if provided.',
       ),
   }),
   output: z.object({

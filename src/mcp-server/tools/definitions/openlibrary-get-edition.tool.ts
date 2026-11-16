@@ -22,10 +22,13 @@ const clampLimits = getServerConfig().clampLimits;
 
 /**
  * Names the shape an identifier was expected to have, or `undefined` when it is
- * well-formed for its type. LCCN has no fixed format upstream, so it passes
- * through unchecked.
+ * well-formed for its type. A blank value is malformed for every type: the
+ * bibkeys route answers an empty key with whatever record carries an empty
+ * value (`LCCN:` resolves to an unrelated edition). Beyond that, LCCN has no
+ * fixed format upstream, so it passes through unchecked.
  */
 function identifierExpectation(identifier: string, idType: EditionIdType): string | undefined {
+  if (identifier.trim() === '') return 'a nonblank identifier';
   if (idType === 'isbn') {
     return isIsbn(identifier)
       ? undefined
@@ -62,15 +65,16 @@ function authorGapNotice({ failed, skipped }: AuthorLookupGaps): string | undefi
       `Author lookups were skipped for ${editionList(skipped)} once a lookup had failed or the call's time budget ran out, rather than wait on a struggling upstream.`,
     );
   }
+  // The list names edition IDs whatever the batch's id_type, so the retry names the type that takes them.
   parts.push(
-    'Those editions list no authors, or show an author ID in place of the name; every other field is complete. Call again later with just those identifiers to fill in the authors.',
+    'Those editions list no authors, or show an author ID in place of the name; every other field is complete. Call again later with id_type "olid" and just those edition IDs to fill in the authors.',
   );
   return parts.join(' ');
 }
 
 export const openlibraryGetEdition = tool('openlibrary_get_edition', {
   title: 'Get Edition',
-  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream batch; with limit clamping enabled, exact duplicates collapse and remaining identifiers are returned as unprocessed for another call. Returns full edition metadata including authors, publisher, languages, all identifier types, and the parent work ID. Author names come inline when recorded; otherwise bounded lookups recover parent-work credits marked as such, and a notice names any edition whose recovery failed. Identifiers that resolve come back in editions; processed misses are listed in unresolved with a reason. The call fails only when no processed identifier resolves, and any unprocessed remainder remains in its error data and recovery guidance.`,
+  description: `Resolve one or more editions by identifier: ISBN-10, ISBN-13, OCLC, LCCN, or Open Library Edition ID (OL…M). Every identifier in a call shares one id_type — pass id_type "isbn" for both ISBN-10 and ISBN-13. Up to ${MAX_IDENTIFIERS} identifiers resolve in a single upstream batch; with limit clamping enabled, exact duplicates collapse and remaining identifiers are returned as unprocessed for another call. Returns full edition metadata including authors, edition-level credits (subtitle, by-statement, translators and other contributors, the language translated from), publisher, languages, all identifier types, and the parent work ID. Author names come inline when recorded; otherwise bounded lookups recover parent-work credits marked as such, and a notice names any edition whose recovery failed. Identifiers that resolve come back in editions, each row echoing its identifier as supplied; processed misses are listed in unresolved with a reason. The call fails only when no processed identifier resolves, and any unprocessed remainder remains in its error data and recovery guidance.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     identifiers: z
@@ -78,7 +82,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         z
           .string()
           .describe(
-            'One identifier value. For ISBN: 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For OCLC: numeric string. For LCCN: string as-is. For OLID: Open Library edition ID (e.g., OL7353617M).',
+            'One identifier value. For ISBN: 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For OCLC: numeric string. For LCCN: string as-is, never blank. For OLID: Open Library edition ID (e.g., OL7353617M).',
           ),
       )
       .min(1)
@@ -104,6 +108,11 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       .array(
         z
           .object({
+            identifier: z
+              .string()
+              .describe(
+                'The entry from identifiers that resolved to this edition, exactly as supplied — before hyphen stripping or any case handling — so it matches the request even when the record does not carry that identifier.',
+              ),
             edition_id: z.string().describe('Open Library Edition ID (OL…M).'),
             title: z.string().describe('Edition title.'),
             authors: z
@@ -127,6 +136,46 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
               )
               .describe(
                 'Authors credited for this edition. Empty when neither the edition nor its parent work records an author, or when the lookup of the parent work failed or was skipped — the notice names those editions.',
+              ),
+            subtitle: z
+              .string()
+              .optional()
+              .describe('Edition subtitle, preserved verbatim. Absent when not recorded.'),
+            by_statement: z
+              .string()
+              .optional()
+              .describe(
+                'Statement of responsibility as cataloged for this edition (e.g., "Translated by A.C. Townsend"), preserved verbatim. Absent when not recorded.',
+              ),
+            contributors: z
+              .array(
+                z
+                  .object({
+                    name: z.string().describe('Contributor name as recorded.'),
+                    role: z
+                      .string()
+                      .optional()
+                      .describe(
+                        'Contribution as recorded (e.g., "Translator", "Editor", "Illustrator"). Absent when the record names none.',
+                      ),
+                  })
+                  .describe('A contributor credited on this edition.'),
+              )
+              .optional()
+              .describe(
+                'Translators, editors, illustrators, and other contributors credited on this edition — never the work-level authors. Absent when none are recorded; contributions can name people this list omits.',
+              ),
+            contributions: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Legacy free-text credit strings as cataloged (e.g., "Garnett, Constance, 1861-1946, translator"), unparsed and independent of contributors. Absent when none are recorded.',
+              ),
+            translated_from: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Codes of the languages this edition was translated from, in the form languages uses (e.g., "rus"). Absent when not recorded.',
               ),
             publish_date: z
               .string()
@@ -192,7 +241,7 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           .describe('A resolved edition record.'),
       )
       .describe(
-        'Editions that resolved, in request order. Shorter than identifiers when any entry missed.',
+        'One row per processed identifier that resolved, in request order; join rows to the request on identifier. Distinct identifiers naming one edition each get their own row. Shorter than identifiers when any entry missed, collapsed as a duplicate, or went unprocessed.',
       ),
     unresolved: z
       .array(
@@ -226,12 +275,12 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Every identifier in the batch is malformed for the specified id_type.',
       recovery:
-        'Check the identifier format: ISBNs are 10 or 13 digits, and an ISBN-10 may end in an X check digit; OCLC numbers are numeric; OLIDs end in M (e.g., OL7353617M).',
+        'Check the identifier format: ISBNs are 10 or 13 digits, and an ISBN-10 may end in an X check digit; OCLC numbers are numeric; OLIDs end in M (e.g., OL7353617M); no identifier of any type may be blank.',
     },
     {
       reason: 'upstream_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "Open Library's batch edition lookup answered with an HTTP error status other than 429, or with an HTML page instead of JSON.",
+      when: "Open Library's batch edition lookup answered with an HTTP error status other than 429, or with an HTML page or other body that is not JSON.",
       recovery:
         "Open Library's edition lookup is failing on its side, not rejecting these identifiers — wait a minute or two and retry the same call.",
       retryable: true,
@@ -319,6 +368,8 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
     const lines: string[] = [];
     const renderAuthor = (a: { name: string; author_id?: string | undefined }) =>
       a.author_id !== undefined ? `${literal(a.name)} (${literal(a.author_id)})` : literal(a.name);
+    const contributor = (c: { name: string; role?: string | undefined }) =>
+      c.role !== undefined ? `${literal(c.name)} (${literal(c.role)})` : literal(c.name);
 
     for (const edition of result.editions) {
       if (edition.title.includes('\n') || edition.title.includes('\r')) {
@@ -327,7 +378,9 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
         lines.push(`## ${edition.title === '' ? NO_TITLE : escapeMarkdownInline(edition.title)}`);
         if (edition.title === '') lines.push('**Title:** ""');
       }
+      lines.push(`**Identifier:** ${literal(edition.identifier)}`);
       lines.push(`**Edition ID:** ${escapeMarkdownInline(edition.edition_id)}`);
+      if (edition.subtitle !== undefined) lines.push(`**Subtitle:** ${literal(edition.subtitle)}`);
       const editionAuthors = edition.authors.filter((a) => a.source === 'edition');
       const workAuthors = edition.authors.filter((a) => a.source === 'work');
       if (edition.authors.length === 0) lines.push('**Authors:** []');
@@ -341,6 +394,13 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
           `**Authors (from parent work — not recorded on this edition):** ${workAuthors.map(renderAuthor).join(', ')}`,
         );
       }
+      if (edition.by_statement !== undefined)
+        lines.push(`**By statement:** ${literal(edition.by_statement)}`);
+      // Credits can carry commas of their own ("Garnett, Constance, 1861-1946"), so entries join on "; ".
+      if (edition.contributors)
+        lines.push(`**Contributors:** ${edition.contributors.map(contributor).join('; ')}`);
+      if (edition.contributions)
+        lines.push(`**Contributions:** ${edition.contributions.map(literal).join('; ')}`);
       const meta: string[] = [];
       if (edition.publish_date !== undefined)
         meta.push(`Published: ${literal(edition.publish_date)}`);
@@ -350,6 +410,8 @@ export const openlibraryGetEdition = tool('openlibrary_get_edition', {
       if (edition.page_count != null) meta.push(`Pages: ${edition.page_count}`);
       if (meta.length) lines.push(meta.join(' | '));
       if (edition.languages) lines.push(`**Cataloged languages:** ${list(edition.languages)}`);
+      if (edition.translated_from)
+        lines.push(`**Translated from:** ${list(edition.translated_from)}`);
       if (edition.physical_format !== undefined)
         lines.push(`**Physical format:** ${literal(edition.physical_format)}`);
       if (edition.edition_name !== undefined)

@@ -65,8 +65,30 @@ export type WorkDetail = {
   last_modified?: string;
 };
 
+/** A contributor credited on one edition — a translator, editor, illustrator, and so on. */
+export type EditionContributor = {
+  name: string;
+  role?: string;
+};
+
+/**
+ * Edition-level title and credit evidence, carried verbatim by both edition
+ * shapes. Each field is absent when the record leaves it missing or empty.
+ * `contributions` holds the legacy free-text credit strings, kept beside the
+ * structured `contributors` rather than merged into them: a record can carry
+ * both, and either can name people the other omits. `translated_from` holds
+ * language codes in the form `languages` uses.
+ */
+export type EditionCredits = {
+  subtitle?: string;
+  by_statement?: string;
+  contributors?: EditionContributor[];
+  contributions?: string[];
+  translated_from?: string[];
+};
+
 /** Edition summary within a work's edition list. */
-export type EditionSummary = {
+export type EditionSummary = EditionCredits & {
   edition_id: string;
   title: string;
   publish_date?: string;
@@ -94,7 +116,7 @@ export type EditionAuthor = {
 };
 
 /** Full edition detail. */
-export type EditionDetail = {
+export type EditionDetail = EditionCredits & {
   edition_id: string;
   title: string;
   authors: EditionAuthor[];
@@ -115,6 +137,13 @@ export type EditionDetail = {
   work_id?: string | undefined;
   ebook_url?: string | undefined;
 };
+
+/**
+ * One resolved row of an identifier batch: the caller's identifier exactly as
+ * supplied — never the canonicalized bibkey — and the edition it named. Distinct
+ * identifiers naming one edition each get their own row.
+ */
+export type ResolvedEdition = { identifier: string } & EditionDetail;
 
 /**
  * Editions in a batch whose author enrichment fell short, by edition ID.

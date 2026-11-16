@@ -77,6 +77,29 @@ describe('openlibraryGetCoverUrl — edge cases and security', () => {
     expect(result.url).toBe('https://covers.openlibrary.org/a/olid/OL24638A-M.jpg');
   });
 
+  // The Covers API matches OLIDs case-sensitively: b/olid/ol7353617m serves the
+  // placeholder GIF where b/olid/OL7353617M serves the cover.
+  it.each([
+    ['ol7353617m', 'book', 'https://covers.openlibrary.org/b/olid/OL7353617M-M.jpg'],
+    ['Ol7353617M', 'book', 'https://covers.openlibrary.org/b/olid/OL7353617M-M.jpg'],
+    ['OL7353617m', 'book', 'https://covers.openlibrary.org/b/olid/OL7353617M-M.jpg'],
+    ['ol31353a', 'author', 'https://covers.openlibrary.org/a/olid/OL31353A-M.jpg'],
+    ['OL31353a', 'author', 'https://covers.openlibrary.org/a/olid/OL31353A-M.jpg'],
+  ] as const)(
+    'upper-cases the olid %s for target %s on both surfaces',
+    async (identifier, target, url) => {
+      const result = await runToolContract(openlibraryGetCoverUrl, {
+        identifier,
+        id_type: 'olid',
+        target,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ url });
+      expect(JSON.stringify(result.content)).toContain(`](<${url}>)`);
+      expect(getOpenLibraryService().getCoverUrl(identifier, 'olid', target, 'M')).toBe(url);
+    },
+  );
+
   // ─── URL structure assertions ───────────────────────────────────────────────
 
   it('always returns HTTPS URL (not HTTP)', async () => {

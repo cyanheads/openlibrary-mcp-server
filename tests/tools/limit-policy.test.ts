@@ -54,35 +54,75 @@ describe('limit policy', () => {
   );
 
   it('records exactly once per shortened request and composes every notice', async () => {
-    const { applyPaginationLimit, paginationLimitNotice, composeNotices } = await import(
-      '@/mcp-server/tools/limit-policy.js'
-    );
+    const {
+      applyPaginationLimit,
+      paginationLimitNotice,
+      composeNotices,
+      PAGE_CEILING,
+      INSIDE_PAGE_CEILING,
+    } = await import('@/mcp-server/tools/limit-policy.js');
+    expect(PAGE_CEILING).toBe(1000);
+    expect(INSIDE_PAGE_CEILING).toBe(100);
     const ctx = createMockContext();
     const log = vi.spyOn(ctx.log, 'notice');
     expect(telemetry.create).not.toHaveBeenCalled();
-    expect(applyPaginationLimit(100, 'openlibrary_search_authors', ctx)).toBe(100);
+    expect(applyPaginationLimit(1000, 1000, 'openlibrary_search_authors', ctx)).toBe(1000);
+    expect(applyPaginationLimit(101, 1000, 'openlibrary_search_authors', ctx)).toBe(101);
+    expect(applyPaginationLimit(100, 100, 'openlibrary_search_inside', ctx)).toBe(100);
     expect(telemetry.create).not.toHaveBeenCalled();
-    expect(applyPaginationLimit(101, 'openlibrary_search_authors', ctx)).toBe(100);
+    expect(applyPaginationLimit(1001, 1000, 'openlibrary_search_authors', ctx)).toBe(1000);
     expect(log).toHaveBeenCalledExactlyOnceWith('Applied Open Library request limit', {
       tool: 'openlibrary_search_authors',
-      requested: 101,
-      applied: 100,
+      requested: 1001,
+      applied: 1000,
     });
     expect(telemetry.create).toHaveBeenCalledTimes(1);
     expect(telemetry.add).toHaveBeenCalledExactlyOnceWith(1, {
       tool: 'openlibrary_search_authors',
     });
-    expect(paginationLimitNotice(101, 20, 0)).toBe(
-      'Requested limit 101; applied limit 100. Next offset: 20.',
+    expect(applyPaginationLimit(101, 100, 'openlibrary_search_inside', ctx)).toBe(100);
+    expect(log).toHaveBeenLastCalledWith('Applied Open Library request limit', {
+      tool: 'openlibrary_search_inside',
+      requested: 101,
+      applied: 100,
+    });
+    expect(telemetry.add).toHaveBeenLastCalledWith(1, { tool: 'openlibrary_search_inside' });
+    expect(telemetry.add).toHaveBeenCalledTimes(2);
+
+    expect(paginationLimitNotice(1001, 1000, 20, 1000, 5000)).toBe(
+      'Requested limit 1001; applied limit 1000. Next offset: 1020.',
     );
-    expect(paginationLimitNotice(101, 20, 7)).toBe(
+    expect(paginationLimitNotice(101, 100, 20, 7, 900)).toBe(
       'Requested limit 101; applied limit 100. Next offset: 27.',
     );
-    expect(paginationLimitNotice(100, 20, 7)).toBeUndefined();
-    expect(composeNotices(undefined, 'Merged author.', paginationLimitNotice(101, 20, 7))).toBe(
-      'Merged author. Requested limit 101; applied limit 100. Next offset: 27.',
+    // A page that reaches the end, or an empty one at or past it, has no next offset to name.
+    expect(paginationLimitNotice(1001, 1000, 4000, 1000, 5000)).toBe(
+      'Requested limit 1001; applied limit 1000.',
     );
+    expect(paginationLimitNotice(1001, 1000, 20, 0, 20)).toBe(
+      'Requested limit 1001; applied limit 1000.',
+    );
+    expect(paginationLimitNotice(1001, 1000, 5000, 0, 161)).toBe(
+      'Requested limit 1001; applied limit 1000.',
+    );
+    expect(paginationLimitNotice(101, 101, 20, 7, 900)).toBeUndefined();
+    expect(paginationLimitNotice(1000, 1000, 20, 7, 900)).toBeUndefined();
+    expect(
+      composeNotices(undefined, 'Merged author.', paginationLimitNotice(1001, 1000, 20, 7, 900)),
+    ).toBe('Merged author. Requested limit 1001; applied limit 1000. Next offset: 27.');
     expect(composeNotices(undefined)).toBeUndefined();
+  });
+
+  it('words the past-end disclosure once for every page tool', async () => {
+    const { pastEndNotice } = await import('@/mcp-server/tools/limit-policy.js');
+    expect(
+      pastEndNotice(5000, 161, '161 works matched', 'the search criteria themselves matched'),
+    ).toBe(
+      'Offset 5000 is past the end of the result set — 161 works matched, so the last offset that returns a result is 160. Retry with a lower offset; the search criteria themselves matched.',
+    );
+    expect(pastEndNotice(1, 1, '1 edition belongs to OL1W')).toBe(
+      'Offset 1 is past the end of the result set — 1 edition belongs to OL1W, so the last offset that returns a result is 0. Retry with a lower offset.',
+    );
   });
 });
 

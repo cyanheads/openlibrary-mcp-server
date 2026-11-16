@@ -30,6 +30,7 @@ import {
   initOpenLibraryService,
   MAX_AUTHOR_REDIRECT_HOPS,
   MAX_WORK_REDIRECT_HOPS,
+  RETRY_DEADLINE_MS,
 } from '@/services/open-library/open-library-service.js';
 
 /** A 404 like Open Library returns for a missing by-ID record (works/authors/editions). */
@@ -104,6 +105,66 @@ describe('OpenLibraryService — search filter compatibility', () => {
     expect(url.searchParams.get('limit')).toBe('100');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('OpenLibraryService — searchBooks criteria forwarding', () => {
+  beforeEach(() => initOpenLibraryService());
+  afterEach(() => vi.restoreAllMocks());
+
+  type SearchParams = Parameters<ReturnType<typeof getOpenLibraryService>['searchBooks']>[0];
+
+  /** The criterion parameters one search sent upstream, keyed by their upstream names. */
+  async function sentCriteria(
+    params: Omit<SearchParams, 'limit' | 'offset'>,
+  ): Promise<Record<string, string>> {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(searchResponse({})));
+    await getOpenLibraryService().searchBooks(
+      { ...params, limit: 1, offset: 0 },
+      createMockContext(),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = new URL(requestUrl(fetchSpy.mock.calls[0]?.[0]));
+    return Object.fromEntries(
+      ['q', 'title', 'author', 'subject', 'publisher', 'isbn'].flatMap((name) => {
+        const value = url.searchParams.get(name);
+        return value === null ? [] : [[name, value]];
+      }),
+    );
+  }
+
+  // Upstream counts padding toward its 3-character query minimum: " ab" matches, "ab" is a 422.
+  it.each<[Omit<SearchParams, 'limit' | 'offset'>, Record<string, string>]>([
+    [{ query: ' ab' }, { q: ' ab' }],
+    [{ query: 'ab' }, { q: 'ab' }],
+    [{ query: 'title:' }, { q: 'title:' }],
+    [{ query: 'ia:callmeishmael0000olso' }, { q: 'ia:callmeishmael0000olso' }],
+    [{ query: '', title: 'faust' }, { title: 'faust' }],
+    [{ title: ' faust ' }, { title: ' faust ' }],
+    [{ isbn: '9780140449136' }, { isbn: '9780140449136' }],
+    [{ isbn: '978-0-14-044913-6' }, { isbn: '9780140449136' }],
+  ])('sends %j as given: %j', async (params, sent) => {
+    expect(await sentCriteria(params)).toEqual(sent);
+  });
+
+  const BLANKS = ['', ' ', '   ', '\t', '\n', ' \t\r\n '];
+  const CRITERIA = ['query', 'title', 'author', 'subject', 'publisher', 'isbn'] as const;
+
+  it.each(CRITERIA.flatMap((field) => BLANKS.map((blank) => [field, blank] as const)))(
+    'leaves a blank %s (%j) out of the request beside a real criterion',
+    async (field, blank) => {
+      const other = field === 'title' ? { author: 'goethe' } : { title: 'faust' };
+      expect(await sentCriteria({ ...other, [field]: blank })).toEqual(other);
+    },
+  );
+
+  it.each(['-', '--', ' - ', '-\t-'])(
+    'leaves a hyphen-only isbn (%j) out of the request',
+    async (isbn) => {
+      expect(await sentCriteria({ title: 'faust', isbn })).toEqual({ title: 'faust' });
+    },
+  );
 });
 
 describe('OpenLibraryService — metadata and normalization', () => {
@@ -461,6 +522,76 @@ describe('OpenLibraryService — searchBooks language filter', () => {
     expect(await searchUrl(' FR ')).toContain('language=fre');
   });
 
+  /** The 20 ISO 639-2 terminology codes that differ from their bibliographic (MARC) forms. */
+  const TERMINOLOGY_TO_MARC = [
+    ['deu', 'ger'],
+    ['fra', 'fre'],
+    ['nld', 'dut'],
+    ['zho', 'chi'],
+    ['ces', 'cze'],
+    ['ell', 'gre'],
+    ['fas', 'per'],
+    ['ron', 'rum'],
+    ['slk', 'slo'],
+    ['cym', 'wel'],
+    ['sqi', 'alb'],
+    ['hye', 'arm'],
+    ['eus', 'baq'],
+    ['mya', 'bur'],
+    ['kat', 'geo'],
+    ['isl', 'ice'],
+    ['mkd', 'mac'],
+    ['mri', 'mao'],
+    ['msa', 'may'],
+    ['bod', 'tib'],
+  ] as const;
+
+  it.each(
+    TERMINOLOGY_TO_MARC.flatMap(([code, marc]) =>
+      [code, code.toUpperCase(), `${code[0]!.toUpperCase()}${code.slice(1)}`].map(
+        (variant) => [variant, marc] as const,
+      ),
+    ),
+  )('sends the ISO 639-2/T code %s as its MARC code %s', async (code, marc) => {
+    expect(new URL(await searchUrl(code)).searchParams.get('language')).toBe(marc);
+  });
+
+  it.each(['cmn', 'yue', 'esk', 'und', 'mul', 'scc', 'ger', 'GER'])(
+    'sends the language record code %s as itself, lowercased',
+    async (code) => {
+      expect(new URL(await searchUrl(code)).searchParams.get('language')).toBe(code.toLowerCase());
+    },
+  );
+
+  it.each(['zxx', 'ZXX', 'ajm', 'kus', 'max', 'tru'])(
+    'sends the MARC code %s, which no Open Library record carries, as itself, lowercased',
+    async (code) => {
+      expect(new URL(await searchUrl(code)).searchParams.get('language')).toBe(code.toLowerCase());
+    },
+  );
+
+  it.each(['qqq', 'QQQ', 'xyz'])(
+    'rejects %s, which is neither a MARC code nor an Open Library language record, before any request',
+    async (code) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(() => Promise.resolve(searchResponse({})));
+      const error = await getOpenLibraryService()
+        .searchBooks({ title: 'faust', language: code, limit: 3, offset: 0 }, createMockContext())
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining(`"${code}"`),
+        data: {
+          reason: 'unknown_language_code',
+          recovery: { hint: expect.stringContaining('3-letter') },
+        },
+      });
+      expect((error as McpError).message).toContain('3-letter');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it('omits the language parameter entirely when none is supplied', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
@@ -578,12 +709,132 @@ describe('OpenLibraryService — searchBooks subject mapping', () => {
   });
 });
 
+type FetchInit = Parameters<typeof globalThis.fetch>[1];
+type SearchHandler = (url: string, init: FetchInit) => Response | Promise<Response>;
+
+/** A page doc in the shape the page request returns: availability is never on the work. */
+function pageDoc(workId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    key: `/works/${workId}`,
+    title: `Title ${workId}`,
+    editions: {
+      numFound: 3,
+      start: 0,
+      numFoundExact: true,
+      docs: [{ key: `/books/${workId.replace('W', 'M')}`, title: 'Selected', language: ['eng'] }],
+    },
+    ...overrides,
+  };
+}
+
+/** True for the keyed availability lookup rather than the page request. */
+function isAvailabilityLookup(url: string): boolean {
+  return new URL(url).searchParams.get('q')?.startsWith('key:(') ?? false;
+}
+
+/** The work IDs a keyed availability lookup names, in request order. */
+function lookupKeys(url: string): string[] {
+  const q = new URL(url).searchParams.get('q') ?? '';
+  return [...q.matchAll(/"\/works\/(OL\d+W)"/g)].map((match) => match[1] ?? '');
+}
+
+/** Every request a search sent, split into the page request and the keyed lookups. */
+function sentRequests(fetchSpy: ReturnType<typeof serveSearch>) {
+  const urls = fetchSpy.mock.calls.map((call) => requestUrl(call[0]));
+  return {
+    page: urls.filter((url) => !isAvailabilityLookup(url)),
+    lookups: urls.filter(isAvailabilityLookup),
+  };
+}
+
+/** A keyed-lookup answer carrying `availability` for each work ID, keyed as upstream keys them. */
+function lookupResponse(entries: Array<[workId: string, availability?: unknown]>): Response {
+  return new Response(
+    JSON.stringify({
+      numFound: entries.length,
+      start: 0,
+      docs: entries.map(([workId, availability]) => ({
+        key: `/works/${workId}`,
+        ia: [`${workId.toLowerCase()}item`],
+        ...(availability === undefined ? {} : { availability }),
+      })),
+    }),
+    { status: 200 },
+  );
+}
+
 /**
- * Availability objects as `/search.json?fields=…,availability` returns them. The
- * partial shapes are verbatim from live searches (moby dick, calculus,
- * cookbook, programming): Open Library nulls five of the booleans on some
- * `open` works, drops six of them on a `status: "error"` lookup, and nulls
- * `openlibrary_edition` alone on others.
+ * Serves `docs` as the page and answers each keyed lookup with `lookup`. `page`
+ * can delay or reshape the page answer; it receives the default response.
+ */
+function serveSearch(
+  docs: Array<Record<string, unknown>>,
+  lookup: SearchHandler = () => lookupResponse([]),
+  page?: (respond: () => Response, init: FetchInit) => Response | Promise<Response>,
+) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(((input: unknown, init: FetchInit) => {
+    const url = requestUrl(input);
+    if (isAvailabilityLookup(url)) return Promise.resolve(lookup(url, init));
+    const respond = () =>
+      new Response(JSON.stringify({ numFound: docs.length, start: 0, docs }), { status: 200 });
+    return Promise.resolve(page ? page(respond, init) : respond());
+  }) as typeof globalThis.fetch);
+}
+
+/** A request that never answers: it settles only when its signal aborts, as a stalled socket does. */
+function hang(init: FetchInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
+/** Answers with `respond()` after `ms` of fake-clock time, unless the request aborts first. */
+function answerAfter(ms: number, init: FetchInit, respond: () => Response): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(respond()), ms);
+    init?.signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(init.signal?.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * Starts `run` on the fake clock and records how it settled and at what
+ * fake-clock time, without leaving a rejection unhandled while the clock runs.
+ */
+function track<T>(run: () => Promise<T>) {
+  const startedAt = Date.now();
+  const state: { value?: T; error?: unknown; elapsedMs?: number } = {};
+  const done = run().then(
+    (value) => {
+      Object.assign(state, { value, elapsedMs: Date.now() - startedAt });
+    },
+    (error: unknown) => {
+      Object.assign(state, { error, elapsedMs: Date.now() - startedAt });
+    },
+  );
+  return { state, done };
+}
+
+/** Runs `run` on the fake clock, advancing it through one whole call deadline, pauses included. */
+async function settle<T>(run: () => Promise<T>): Promise<T> {
+  const [result] = await Promise.all([run(), vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS)]);
+  return result;
+}
+
+/**
+ * Availability objects as the keyed `/search.json` lookup
+ * (`fields=key,ia,availability`) returns them on each work. The partial shapes
+ * are verbatim from live searches (moby dick, calculus, cookbook, programming):
+ * Open Library nulls five of the booleans on some `open` works, drops six of
+ * them on a `status: "error"` lookup, and nulls `openlibrary_edition` alone on
+ * others.
  */
 describe('OpenLibraryService — searchBooks availability mapping', () => {
   const COMPLETE = {
@@ -645,21 +896,20 @@ describe('OpenLibraryService — searchBooks availability mapping', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
   async function availabilityFor(availability: unknown) {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(
-        searchResponse({
-          ia: ['someitem'],
-          ...(availability === undefined ? {} : { availability }),
-        }),
-      ),
+    vi.useFakeTimers();
+    serveSearch([pageDoc('OL45804W', { ia: ['someitem'] })], () =>
+      lookupResponse([['OL45804W', availability]]),
     );
-    const result = await getOpenLibraryService().searchBooks(
-      { query: 'moby dick', limit: 1, offset: 0, include_availability: true },
-      createMockContext(),
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'moby dick', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
     );
     return result.works[0]?.availability;
   }
@@ -724,42 +974,21 @@ describe('OpenLibraryService — searchBooks availability mapping', () => {
     expect(await availabilityFor(value)).toBeNull();
   });
 
-  it('leaves availability out entirely when it was not requested', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(searchResponse({ availability: COMPLETE })),
-    );
-    const result = await getOpenLibraryService().searchBooks(
-      { query: 'moby dick', limit: 1, offset: 0 },
-      createMockContext(),
-    );
-    expect(result.works[0]?.availability).toBeUndefined();
-  });
-
   it('returns the whole page through the tool when works carry every partial shape', async () => {
+    vi.useFakeTimers();
     const shapes = [COMPLETE, NULL_BOOLEANS, ERROR_STATUS, EDITION_NULL_ONLY, 'garbage', null];
-    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            numFound: shapes.length,
-            start: 0,
-            docs: shapes.map((availability, i) => ({
-              key: `/works/OL${i + 1}W`,
-              title: `Work ${i + 1}`,
-              ia: [`item${i}`],
-              availability,
-            })),
-          }),
-          { status: 200 },
-        ),
-      ),
+    serveSearch(
+      shapes.map((_, i) => pageDoc(`OL${i + 1}W`, { title: `Work ${i + 1}`, ia: [`item${i}`] })),
+      () => lookupResponse(shapes.map((availability, i) => [`OL${i + 1}W`, availability])),
     );
 
-    const result = await runToolContract(openlibrarySearchBooks, {
-      query: 'moby dick',
-      limit: 50,
-      include_availability: true,
-    });
+    const result = await settle(() =>
+      runToolContract(openlibrarySearchBooks, {
+        query: 'moby dick',
+        limit: 50,
+        include_availability: true,
+      }),
+    );
 
     expect(result.isError).toBeFalsy();
     const works = (result.structuredContent as { works: Array<{ availability: unknown }> }).works;
@@ -777,6 +1006,846 @@ describe('OpenLibraryService — searchBooks availability mapping', () => {
     expect(text).toContain('**Availability:** Status: open | Preview: true | Restricted: false');
     expect(text).toContain('No availability returned');
     expect(text).not.toContain('null');
+    // A null payload is the Internet Archive giving no answer, so OL6W alone is unknown.
+    const { notice } = result.structuredContent as { notice?: string };
+    expect(notice).toContain('Availability is unknown for work OL6W:');
+    expect(text).toContain(notice);
+  });
+});
+
+/**
+ * With `editions` in `fields`, Open Library attaches `availability` to the
+ * selected edition (`editions.docs[0]`) — and only when that nested doc carries
+ * an `ia` item — never to the work. So the page request cannot answer work-level
+ * availability; a keyed `/search.json` lookup does, by exact work key.
+ */
+describe('OpenLibraryService — searchBooks keyed availability lookup', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps matching_edition and matching_edition_count from the page request', async () => {
+    serveSearch([pageDoc('OL102749W', { ia: ['mobydick00melv'] })]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { title: 'moby dick', author: 'melville', limit: 1, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works[0]).toMatchObject({
+      work_id: 'OL102749W',
+      matching_edition_count: 3,
+      matching_edition: { edition_id: 'OL102749M', title: 'Selected', languages: ['eng'] },
+    });
+  });
+
+  it('sends one request and leaves availability absent when it was not requested', async () => {
+    const fetchSpy = serveSearch([pageDoc('OL102749W', { ia: ['mobydick00melv'] })]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'moby dick', limit: 1, offset: 0 },
+      createMockContext(),
+    );
+
+    expect(result.works[0]?.availability).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(sentRequests(fetchSpy).lookups).toEqual([]);
+  });
+
+  it('sends no lookup and maps availability to null when no returned work has an IA item', async () => {
+    const fetchSpy = serveSearch([pageDoc('OL1W'), pageDoc('OL2W', { ia: [] })]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'obscure', limit: 2, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works.map((w) => w.availability)).toEqual([null, null]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no lookup on an empty page', async () => {
+    const fetchSpy = serveSearch([]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'xyzzy', limit: 10, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // The #55 repro: OL102749W is public domain, yet 0.4.0 answered null.
+  it('returns the work-level status from the keyed lookup, not the selected edition', async () => {
+    serveSearch(
+      [
+        pageDoc('OL102749W', {
+          ia: ['bwb_W9-CNP-717'],
+          editions: {
+            numFound: 1109,
+            start: 0,
+            numFoundExact: true,
+            docs: [
+              {
+                key: '/books/OL58723483M',
+                title: 'Moby Dick',
+                availability: { status: 'borrow_unavailable', is_lendable: true },
+              },
+            ],
+          },
+        }),
+      ],
+      () =>
+        lookupResponse([
+          ['OL102749W', { status: 'open', is_readable: true, identifier: 'bwb_W9-CNP-717' }],
+        ]),
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { title: 'moby dick', author: 'melville', limit: 1, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works[0]).toMatchObject({
+      work_id: 'OL102749W',
+      availability: { status: 'open', is_readable: true },
+      matching_edition_count: 1109,
+      matching_edition: { edition_id: 'OL58723483M', title: 'Moby Dick' },
+    });
+    expect(result.availabilityUnknown).toBeUndefined();
+  });
+
+  it('leaves availability out of the page request', async () => {
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['item1'] })]);
+
+    await getOpenLibraryService().searchBooks(
+      { query: 'moby dick', limit: 1, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    const [pageUrl] = sentRequests(fetchSpy).page;
+    const fields = new URL(pageUrl ?? '').searchParams.get('fields')?.split(',');
+    expect(fields).not.toContain('availability');
+    expect(fields).toEqual(expect.arrayContaining(['ia', 'editions', 'editions.key']));
+  });
+
+  it('names exactly the returned works with an IA item, by quoted full key', async () => {
+    const fetchSpy = serveSearch([
+      pageDoc('OL1W', { ia: ['item1'] }),
+      pageDoc('OL2W'),
+      pageDoc('OL3W', { ia: ['item3a', 'item3b'] }),
+    ]);
+
+    await getOpenLibraryService().searchBooks(
+      { query: 'whales', limit: 3, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    const { lookups } = sentRequests(fetchSpy);
+    expect(lookups).toHaveLength(1);
+    const params = new URL(lookups[0] ?? '').searchParams;
+    expect(params.get('q')).toBe('key:("/works/OL1W" OR "/works/OL3W")');
+    // Without `ia` in the field list, Open Library returns no availability at all.
+    expect(params.get('fields')).toBe('key,ia,availability');
+    expect(params.get('limit')).toBe('2');
+  });
+
+  // Only an OLID-shaped key is spliced into the quoted query, so a key carrying a quote never reaches it.
+  it('leaves a work with an IA item but no OLID key out of the lookup, as none returned', async () => {
+    const fetchSpy = serveSearch([
+      pageDoc('OL1W', { ia: ['item1'] }),
+      pageDoc('OL4W" OR "x', { ia: ['item4'] }),
+      { ...pageDoc('OL5W', { ia: ['item5'] }), key: undefined },
+      pageDoc('OL3W', { ia: ['item3'] }),
+    ]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'whales', limit: 4, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    const { lookups } = sentRequests(fetchSpy);
+    expect(lookups).toHaveLength(1);
+    const params = new URL(lookups[0] ?? '').searchParams;
+    expect(params.get('q')).toBe('key:("/works/OL1W" OR "/works/OL3W")');
+    expect(params.get('limit')).toBe('2');
+    expect(result.works.map((w) => [w.work_id, w.availability])).toEqual([
+      ['OL1W', null],
+      ['OL4W" OR "x', null],
+      ['', null],
+      ['OL3W', null],
+    ]);
+    expect(result.availabilityUnknown).toBeUndefined();
+  });
+
+  it('sends no lookup when the only work with an IA item has no OLID key', async () => {
+    const fetchSpy = serveSearch([pageDoc('OL1W'), pageDoc('OL4W" OR "x', { ia: ['item4'] })]);
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'whales', limit: 2, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.works.map((w) => w.availability)).toEqual([null, null]);
+    expect(result.availabilityUnknown).toBeUndefined();
+  });
+
+  it('splits a 1000-row page into lookups of at most 100 keys and joins each on key', async () => {
+    // 750 of 1000 works carry an IA item; the lookup omits every tenth of them.
+    const ids = Array.from({ length: 1000 }, (_, i) => `OL${i + 1}W`);
+    const withIa = ids.filter((_, i) => i % 4 !== 3);
+    const omitted = new Set(withIa.filter((_, i) => i % 10 === 0));
+    const fetchSpy = serveSearch(
+      ids.map((id, i) => pageDoc(id, i % 4 !== 3 ? { ia: [`${id}item`] } : {})),
+      (url) =>
+        // Answered in reverse, so only a join by key can line rows up.
+        lookupResponse(
+          lookupKeys(url)
+            .filter((id) => !omitted.has(id))
+            .reverse()
+            .map((id) => [id, { status: `status-${id}` }]),
+        ),
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'history', limit: 1000, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    const { lookups } = sentRequests(fetchSpy);
+    expect(lookups.map((url) => lookupKeys(url).length)).toEqual([
+      100, 100, 100, 100, 100, 100, 100, 50,
+    ]);
+    expect(lookups.map((url) => new URL(url).searchParams.get('limit'))).toEqual([
+      '100',
+      '100',
+      '100',
+      '100',
+      '100',
+      '100',
+      '100',
+      '50',
+    ]);
+    expect(lookups.flatMap(lookupKeys)).toEqual(withIa);
+    expect(result.works).toHaveLength(1000);
+    for (const work of result.works) {
+      const expected =
+        withIa.includes(work.work_id) && !omitted.has(work.work_id)
+          ? { status: `status-${work.work_id}` }
+          : null;
+      expect(work.availability).toEqual(expected);
+    }
+    expect(result.availabilityUnknown).toBeUndefined();
+  });
+
+  it('keeps at most three lookups in flight, and reaches three', async () => {
+    const tracker = { inFlight: 0, peak: 0 };
+    const ids = Array.from({ length: 1000 }, (_, i) => `OL${i + 1}W`);
+    serveSearch(
+      ids.map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      async (url) => {
+        tracker.inFlight++;
+        tracker.peak = Math.max(tracker.peak, tracker.inFlight);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          return lookupResponse(lookupKeys(url).map((id) => [id, { status: 'open' }]));
+        } finally {
+          tracker.inFlight--;
+        }
+      },
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'history', limit: 1000, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works.every((w) => w.availability?.status === 'open')).toBe(true);
+    // Ten lookups, so three can be in flight at once.
+    expect(tracker.peak).toBe(3);
+  });
+
+  it.each([
+    [
+      'a gateway 503 page',
+      () =>
+        new Response('<html><body><h1>503 Service Unavailable</h1></body></html>', { status: 503 }),
+    ],
+    ['a 2xx HTML page', () => new Response('<!DOCTYPE html><html><body>down</body></html>')],
+    ['an HTTP 404', () => new Response('{}', { status: 404 })],
+    [
+      'an HTTP 422',
+      () => new Response(JSON.stringify({ detail: [{ msg: 'Invalid' }] }), { status: 422 }),
+    ],
+    ['a body of another shape', () => new Response(JSON.stringify({ docs: 'none' }))],
+  ])(
+    'degrades %s from the lookup to availability unknown, in one request',
+    async (_label, fail) => {
+      const fetchSpy = serveSearch(
+        [pageDoc('OL1W', { ia: ['item1'] }), pageDoc('OL2W'), pageDoc('OL3W', { ia: ['item3'] })],
+        fail,
+      );
+
+      const result = await getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 3, offset: 0, include_availability: true },
+        createMockContext(),
+      );
+
+      // The page survives; neither invalid_search_query nor not_found reaches the caller.
+      expect(result.total).toBe(3);
+      expect(result.works.map((w) => w.availability)).toEqual([null, null, null]);
+      expect(result.availabilityUnknown).toEqual(['OL1W', 'OL3W']);
+      expect(sentRequests(fetchSpy).lookups).toHaveLength(1);
+    },
+  );
+
+  /**
+   * Live shape: when the Internet Archive's availability service fails, Open
+   * Library still answers 200 and sets every work's `availability` to `null`,
+   * while a work with no scan the Internet Archive lends has the key left out.
+   */
+  it('reports a work answered with availability null as unknown, and keeps looking up', async () => {
+    vi.useFakeTimers();
+    const ids = Array.from({ length: 150 }, (_, i) => `OL${i + 1}W`);
+    const fetchSpy = serveSearch(
+      ids.map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      (url) => {
+        const keys = lookupKeys(url);
+        // The first lookup's batch failed upstream; the second answered.
+        if (keys[0] === 'OL1W') return lookupResponse(keys.map((id) => [id, null]));
+        return lookupResponse(
+          keys.map((id) => (id === 'OL150W' ? [id] : [id, { status: 'borrow_available' }])),
+        );
+      },
+    );
+
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 150, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+
+    // The null batch is asked about once more, then left unknown.
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(3);
+    expect(result.availabilityUnknown).toEqual(ids.slice(0, 100));
+    expect(result.works.slice(0, 100).every((w) => w.availability === null)).toBe(true);
+    expect(result.works[100]?.availability).toEqual({ status: 'borrow_available' });
+    // Left out of the answer: no lendable scan, which is "none returned", not unknown.
+    expect(result.works[149]?.availability).toBeNull();
+  });
+
+  it('asks once more about only the works answered null, and takes the second answer', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const fetchSpy = serveSearch(
+      ['OL1W', 'OL2W', 'OL3W'].map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      (url) => {
+        calls += 1;
+        if (calls === 1) {
+          return lookupResponse([
+            ['OL1W', null],
+            ['OL2W', { status: 'open' }],
+            ['OL3W', null],
+          ]);
+        }
+        return lookupResponse(
+          lookupKeys(url).map((id) => [id, id === 'OL1W' ? { status: 'borrow_available' } : null]),
+        );
+      },
+    );
+
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 3, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+
+    const { lookups } = sentRequests(fetchSpy);
+    expect(lookups).toHaveLength(2);
+    expect(lookupKeys(lookups[1] ?? '')).toEqual(['OL1W', 'OL3W']);
+    expect(result.works.map((w) => w.availability)).toEqual([
+      { status: 'borrow_available' },
+      { status: 'open' },
+      null,
+    ]);
+    expect(result.availabilityUnknown).toEqual(['OL3W']);
+  });
+
+  it('keeps the first answer when the second ask fails at the HTTP level', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    serveSearch([pageDoc('OL1W', { ia: ['a'] }), pageDoc('OL2W', { ia: ['b'] })], () => {
+      calls += 1;
+      return calls === 1
+        ? lookupResponse([
+            ['OL1W', null],
+            ['OL2W', { status: 'open' }],
+          ])
+        : new Response('<html>No server is available</html>', { status: 503 });
+    });
+
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 2, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+
+    expect(result.works[1]?.availability).toEqual({ status: 'open' });
+    expect(result.availabilityUnknown).toEqual(['OL1W']);
+  });
+
+  // Only the first answer's omission means "none returned"; the re-ask was about a work known to have a scan.
+  it('reports a work the re-ask leaves out of its answer as unknown, not as none', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const fetchSpy = serveSearch(
+      [pageDoc('OL1W', { ia: ['a'] }), pageDoc('OL2W', { ia: ['b'] })],
+      () => {
+        calls += 1;
+        return calls === 1
+          ? lookupResponse([
+              ['OL1W', null],
+              ['OL2W', { status: 'open' }],
+            ])
+          : lookupResponse([]);
+      },
+    );
+
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 2, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(2);
+    expect(result.works.map((w) => w.availability)).toEqual([null, { status: 'open' }]);
+    expect(result.availabilityUnknown).toEqual(['OL1W']);
+  });
+
+  it('names the unknown works in page order when both answers list them in reverse', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch(
+      ['OL1W', 'OL2W', 'OL3W'].map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      (url) =>
+        lookupResponse(
+          lookupKeys(url)
+            .reverse()
+            .map((id) => [id, null]),
+        ),
+    );
+
+    const result = await settle(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 3, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(2);
+    expect(result.availabilityUnknown).toEqual(['OL1W', 'OL2W', 'OL3W']);
+  });
+
+  it('re-asks only after every first lookup settles and a pause passes, one at a time', async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const ids = Array.from({ length: 300 }, (_, i) => `OL${i + 1}W`);
+    const sent: Array<{ first: string; at: number }> = [];
+    const reasks = { inFlight: 0, peak: 0 };
+    serveSearch(
+      ids.map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      async (url, init) => {
+        const keys = lookupKeys(url);
+        const first = keys[0] ?? '';
+        const reask = sent.some((entry) => entry.first === first);
+        sent.push({ first, at: Date.now() - startedAt });
+        // Every first lookup lands in one Internet Archive failure; the re-asks answer.
+        if (!reask) return lookupResponse(keys.map((id) => [id, null]));
+        reasks.inFlight++;
+        reasks.peak = Math.max(reasks.peak, reasks.inFlight);
+        try {
+          return await answerAfter(100, init, () =>
+            lookupResponse(keys.map((id) => [id, { status: 'open' }])),
+          );
+        } finally {
+          reasks.inFlight--;
+        }
+      },
+    );
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 300, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(sent.map((entry) => entry.first)).toEqual(['OL1W', 'OL101W', 'OL201W']);
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(sent.map((entry) => entry.first)).toEqual([
+      'OL1W',
+      'OL101W',
+      'OL201W',
+      'OL1W',
+      'OL101W',
+      'OL201W',
+    ]);
+    expect(sent.slice(3).every((entry) => entry.at >= 2000)).toBe(true);
+    expect(reasks.peak).toBe(1);
+    expect(call.state.value?.availabilityUnknown).toBeUndefined();
+    expect(call.state.value?.works.every((w) => w.availability?.status === 'open')).toBe(true);
+  });
+
+  it('rejects with the cancellation when the caller aborts during the pause', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['a'] })], () =>
+      lookupResponse([['OL1W', null]]),
+    );
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 1, offset: 0, include_availability: true },
+        createMockContext({ signal: controller.signal }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toBe(controller.signal.reason);
+    expect(call.state.elapsedMs).toBe(1000);
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(1);
+  });
+
+  it('rejects with the cancellation when the caller aborts during a re-ask request', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['a'] })], (_url, init) => {
+      calls += 1;
+      if (calls === 1) return lookupResponse([['OL1W', null]]);
+      queueMicrotask(() => controller.abort());
+      return hang(init);
+    });
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 1, offset: 0, include_availability: true },
+        createMockContext({ signal: controller.signal }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.value).toBeUndefined();
+    expect(call.state.error).toBeInstanceOf(McpError);
+    expect(call.state.error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    // Cancelled as the re-ask went out, right after the pause.
+    expect(call.state.elapsedMs).toBe(2000);
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(2);
+  });
+
+  it('leaves works answered null unknown when no time is left for the pause', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch(
+      [pageDoc('OL1W', { ia: ['a'] })],
+      () => lookupResponse([['OL1W', null]]),
+      (respond) => {
+        // The page answers with less than the pause left of the budget it shares.
+        vi.setSystemTime(Date.now() + RETRY_DEADLINE_MS - 1000);
+        return respond();
+      },
+    );
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'history', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(1);
+    expect(call.state.value?.availabilityUnknown).toEqual(['OL1W']);
+    // It returns at once, rather than pausing past the deadline it shares with the page.
+    expect(call.state.elapsedMs).toBe(RETRY_DEADLINE_MS - 1000);
+  });
+
+  it('stops starting lookups after one fails and reports every skipped work unknown', async () => {
+    const ids = Array.from({ length: 500 }, (_, i) => `OL${i + 1}W`);
+    const fetchSpy = serveSearch(
+      ids.map((id) => pageDoc(id, { ia: [`${id}item`] })),
+      () => new Response('<html>No server is available</html>', { status: 503 }),
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'history', limit: 500, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    // Five chunks; only those already in flight when the first failed were sent.
+    expect(sentRequests(fetchSpy).lookups.length).toBeLessThanOrEqual(3);
+    expect(result.availabilityUnknown).toEqual(ids);
+    expect(result.works.every((w) => w.availability === null)).toBe(true);
+  });
+
+  it('rejects with the cancellation when the caller aborts during the lookup', async () => {
+    const controller = new AbortController();
+    serveSearch([pageDoc('OL1W', { ia: ['item1'] })], (_url, init) => {
+      queueMicrotask(() => controller.abort());
+      return hang(init);
+    });
+
+    const error = await getOpenLibraryService()
+      .searchBooks(
+        { query: 'whales', limit: 1, offset: 0, include_availability: true },
+        createMockContext({ signal: controller.signal }),
+      )
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+  });
+
+  it.each([
+    ['an HTTP 500', () => new Response('{}', { status: 500 })],
+    ['a truncated JSON body', () => new Response('{"docs": [')],
+  ])('retries %s from the lookup inside the deadline, then degrades', async (_label, fail) => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['item1'] })], fail);
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toBeUndefined();
+    expect(call.state.value?.availabilityUnknown).toEqual(['OL1W']);
+    expect(sentRequests(fetchSpy).lookups.length).toBeGreaterThan(1);
+    expect(call.state.elapsedMs).toBeLessThanOrEqual(RETRY_DEADLINE_MS);
+  });
+
+  it('ends a call whose lookup hangs inside the one deadline it shares with the page', async () => {
+    vi.useFakeTimers();
+    serveSearch(
+      [pageDoc('OL1W', { ia: ['item1'] })],
+      (_url, init) => hang(init),
+      (respond, init) => answerAfter(20_000, init, respond),
+    );
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(2 * RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toBeUndefined();
+    expect(call.state.value?.works[0]?.availability).toBeNull();
+    expect(call.state.value?.availabilityUnknown).toEqual(['OL1W']);
+    // The lookup got only the 30 s the page request left, not a fresh 50 s.
+    expect(call.state.elapsedMs).toBe(RETRY_DEADLINE_MS);
+  });
+
+  it('sends no lookup when the page request spent the whole deadline', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['item1'] })], undefined, (respond) => {
+      // The page answers at the very end of the budget it shares with the lookup.
+      vi.setSystemTime(Date.now() + RETRY_DEADLINE_MS);
+      return respond();
+    });
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'whales', limit: 1, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(sentRequests(fetchSpy).lookups).toEqual([]);
+    expect(result.availabilityUnknown).toEqual(['OL1W']);
+    expect(result.works[0]?.availability).toBeNull();
+  });
+
+  it('discloses unknown availability in the notice on both client surfaces', async () => {
+    serveSearch(
+      [pageDoc('OL1W', { ia: ['item1'] }), pageDoc('OL2W')],
+      () => new Response('<html>No server is available</html>', { status: 503 }),
+    );
+
+    const result = await runToolContract(openlibrarySearchBooks, {
+      query: 'whales',
+      limit: 2,
+      include_availability: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      notice?: string;
+      works: Array<{ availability: unknown }>;
+    };
+    expect(structured.works.map((w) => w.availability)).toEqual([null, null]);
+    expect(structured.notice).toContain('OL1W');
+    expect(structured.notice).not.toContain('OL2W');
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain(structured.notice);
+  });
+
+  it('names several works answered null, in page order, in one notice on both client surfaces', async () => {
+    vi.useFakeTimers();
+    serveSearch(
+      [
+        pageDoc('OL1W', { ia: ['a'] }),
+        pageDoc('OL2W', { ia: ['b'] }),
+        pageDoc('OL3W'),
+        pageDoc('OL4W', { ia: ['d'] }),
+      ],
+      (url) =>
+        lookupResponse(
+          lookupKeys(url)
+            .reverse()
+            .map((id) => [id, null]),
+        ),
+    );
+
+    const result = await settle(() =>
+      runToolContract(openlibrarySearchBooks, {
+        query: 'whales',
+        limit: 4,
+        include_availability: true,
+      }),
+    );
+
+    expect(result.isError).toBeFalsy();
+    const notice =
+      'Availability is unknown for 3 works OL1W, OL2W, OL4W: the availability lookup did not complete, so missing availability there does not mean none exists. Retry the search to fetch it.';
+    expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain(notice);
+  });
+});
+
+/**
+ * The statuses the lookup's failure map reaches through the framework's status
+ * mapping that the block above leaves unstubbed: Forbidden, a Retry-After past
+ * the ladder's 30 s delay cap, and gateway codes with a JSON body.
+ */
+describe('OpenLibraryService — searchBooks availability lookup, remaining statuses', () => {
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [
+      'an HTTP 403 bot-check page',
+      () => new Response('<html><body>Access denied</body></html>', { status: 403 }),
+    ],
+    ['an HTTP 403 JSON body', () => new Response('{}', { status: 403 })],
+    [
+      'an HTTP 429 whose Retry-After outlasts the delay cap',
+      () => new Response('{}', { status: 429, headers: { 'Retry-After': '120' } }),
+    ],
+    ['an HTTP 502 JSON body', () => new Response('{}', { status: 502 })],
+    ['an HTTP 504 JSON body', () => new Response('{}', { status: 504 })],
+  ])(
+    'degrades %s from the lookup to availability unknown, in one request',
+    async (_label, fail) => {
+      const fetchSpy = serveSearch(
+        [pageDoc('OL1W', { ia: ['item1'] }), pageDoc('OL2W'), pageDoc('OL3W', { ia: ['item3'] })],
+        fail,
+      );
+
+      const result = await getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 3, offset: 0, include_availability: true },
+        createMockContext(),
+      );
+
+      expect(result.total).toBe(3);
+      expect(result.works.map((w) => w.availability)).toEqual([null, null, null]);
+      expect(result.availabilityUnknown).toEqual(['OL1W', 'OL3W']);
+      expect(sentRequests(fetchSpy).lookups).toHaveLength(1);
+    },
+  );
+
+  it('retries an HTTP 429 with a short Retry-After inside the deadline, then degrades', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch(
+      [pageDoc('OL1W', { ia: ['item1'] })],
+      () => new Response('{}', { status: 429, headers: { 'Retry-After': '2' } }),
+    );
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toBeUndefined();
+    expect(call.state.value?.availabilityUnknown).toEqual(['OL1W']);
+    // One attempt plus the ladder's three retries, each after the 2 s Retry-After.
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(4);
+    expect(call.state.elapsedMs).toBeLessThan(RETRY_DEADLINE_MS);
+  });
+
+  it('settles a call whose page answers at once but whose lookup hangs at the shared deadline', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = serveSearch([pageDoc('OL1W', { ia: ['item1'] })], (_url, init) => hang(init));
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'whales', limit: 1, offset: 0, include_availability: true },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(2 * RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toBeUndefined();
+    expect(call.state.value?.availabilityUnknown).toEqual(['OL1W']);
+    // A 30 s search-class attempt, then a second one cut off by the deadline.
+    expect(sentRequests(fetchSpy).lookups).toHaveLength(2);
+    expect(call.state.elapsedMs).toBe(RETRY_DEADLINE_MS);
+  });
+
+  it('maps a work the lookup answer leaves out to null without naming it unknown', async () => {
+    serveSearch([pageDoc('OL1W', { ia: ['item1'] }), pageDoc('OL2W', { ia: ['item2'] })], () =>
+      lookupResponse([['OL2W', { status: 'open' }]]),
+    );
+
+    const result = await getOpenLibraryService().searchBooks(
+      { query: 'whales', limit: 2, offset: 0, include_availability: true },
+      createMockContext(),
+    );
+
+    expect(result.works.map((w) => w.availability)).toEqual([null, { status: 'open' }]);
+    expect(result.availabilityUnknown).toBeUndefined();
   });
 });
 
@@ -872,6 +1941,71 @@ describe('OpenLibraryService — getSubject', () => {
 
     expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain('/subjects/science_fiction.json');
     expect(result.subject_key).toBe('science_fiction');
+  });
+
+  /** Answers every subject request with `body`, recording the requested subject keys. */
+  function subjectRoute(body: Record<string, unknown>) {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(new Response(JSON.stringify(body))));
+    return () =>
+      spy.mock.calls.map(([input]) => {
+        const path = new URL(requestUrl(input)).pathname;
+        return decodeURIComponent(path.slice('/subjects/'.length, -'.json'.length));
+      });
+  }
+
+  // A space after the colon of a browse prefix would otherwise become part of the
+  // value — "place:_london" — and match nothing.
+  it.each([
+    ['place: london', 'place:london'],
+    ['place:london', 'place:london'],
+    ['  Place:   London (England) ', 'place:london_(england)'],
+    ['person:\tElizabeth Bennet', 'person:elizabeth_bennet'],
+    ['TIME:\n 19th century', 'time:19th_century'],
+  ])('drops whitespace after a recognized prefix in %j', async (subject, key) => {
+    const requestedKeys = subjectRoute({ name: 'x', work_count: 0, works: [] });
+
+    const result = await getOpenLibraryService().getSubject(subject, 12, 0, createMockContext());
+
+    expect(requestedKeys()).toEqual([key]);
+    expect(result.subject_key).toBe(key);
+  });
+
+  it.each([
+    ['org: united nations', 'org:_united_nations'],
+    ['science: fiction', 'science:_fiction'],
+    ['place :london', 'place_:london'],
+    ['london place: england', 'london_place:_england'],
+  ])('keeps whitespace after an unrecognized or mid-text colon in %j', async (subject, key) => {
+    const requestedKeys = subjectRoute({ name: 'x', work_count: 0, works: [] });
+
+    await getOpenLibraryService().getSubject(subject, 12, 0, createMockContext());
+
+    expect(requestedKeys()).toEqual([key]);
+  });
+
+  it.each(['subject', 'place', 'person', 'time'])(
+    'maps the upstream subject_type %s',
+    async (subjectType) => {
+      subjectRoute({ name: 'x', subject_type: subjectType, work_count: 3, works: [] });
+
+      const result = await getOpenLibraryService().getSubject('x', 12, 0, createMockContext());
+
+      expect(result.subject_type).toBe(subjectType);
+    },
+  );
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['numeric', 7],
+  ])('omits a %s upstream subject_type rather than inventing one', async (_label, raw) => {
+    subjectRoute({ name: 'x', ...(raw === undefined ? {} : { subject_type: raw }), work_count: 0 });
+
+    const result = await getOpenLibraryService().getSubject('x', 12, 0, createMockContext());
+
+    expect(result).not.toHaveProperty('subject_type');
   });
 });
 
@@ -1131,6 +2265,367 @@ describe('OpenLibraryService — edition batch mapping', () => {
     expect(editions[0]?.authors).toEqual([
       { name: 'OL631509A', author_id: 'OL631509A', source: 'work' },
     ]);
+  });
+});
+
+/**
+ * Edition-level credits: `subtitle`, `by_statement`, `contributors`, the legacy
+ * `contributions` strings, and `translated_from`. `editions.json` entries and
+ * `/api/books.json` details carry identical values for them, so both routes
+ * share one mapping. Fixtures are real records, trimmed.
+ */
+describe('OpenLibraryService — edition credit fields', () => {
+  /** ISBN 9780143035008 → OL7361482M, the Pevear & Volokhonsky translation. */
+  const PEVEAR = {
+    key: '/books/OL7361482M',
+    title: 'Anna Karenina',
+    authors: [{ key: '/authors/OL26783A', name: 'Leo Tolstoy' }],
+    publishers: ['Penguin'],
+    languages: [{ key: '/languages/eng' }],
+    translated_from: [{ key: '/languages/rus' }],
+    contributors: [
+      { role: 'Translator', name: 'Richard Pevear' },
+      { role: 'Translator', name: 'Larissa Volokhonsky' },
+    ],
+    contributions: ['Richard Pevear (Translator)', 'Larissa Volokhonsky (Translator)'],
+    isbn_10: ['0143035002'],
+    isbn_13: ['9780143035008'],
+    number_of_pages: 838,
+    edition_name: 'Penguin Classics Deluxe Edition',
+    publish_date: 'May 31, 2004',
+    covers: [111128],
+    works: [{ key: '/works/OL267096W' }],
+  };
+
+  /** OL249260M — its joint translator, Charles Morice, appears only in `contributions`. */
+  const KARAMAZOV = {
+    key: '/books/OL249260M',
+    title: 'Les frères Karamazov',
+    subtitle: null,
+    by_statement:
+      'traduit et adapté par E. Halpérine-Kaminsky et Ch. Morice, avec un portrait de Th. Dostoïevsky ...',
+    contributors: [{ role: 'Translator', name: 'E. Halpérine-Kaminsky' }],
+    contributions: [
+      'Halpérine-Kaminsky, E. 1858-1936, tr.',
+      'Morice, Charles, 1861-1919, joint tr.',
+    ],
+    translated_from: [{ key: '/languages/rus' }],
+    works: [{ key: '/works/OL10432709W' }],
+  };
+
+  /** OL45545108M — carries all five fields. */
+  const NAKAMURA = {
+    key: '/books/OL45545108M',
+    title: 'Anna karēnina',
+    subtitle: 'Anna Karenina',
+    by_statement: 'by Lev Tolstoi ; translated by Nakamura Hakuyō',
+    contributors: [{ role: 'Translator', name: 'Nakamura Hakuyō' }],
+    contributions: ['Nakamura, Hakuyō, 1890-1974, translator'],
+    translated_from: [{ key: '/languages/rus' }],
+    languages: [{ key: '/languages/jpn' }],
+    publishers: ['Shinchōsha'],
+    publish_date: '1955',
+    works: [{ key: '/works/OL267096W' }],
+  };
+
+  const CREDIT_FIELDS: readonly string[] = [
+    'subtitle',
+    'by_statement',
+    'contributors',
+    'contributions',
+    'translated_from',
+  ];
+
+  type RawRecord = Record<string, unknown> & { key: string };
+
+  /** Maps the same records through both edition routes: bibkeys details by OLID, and one editions page. */
+  async function mapBoth(records: RawRecord[]) {
+    const olids = records.map((r) => r.key.slice('/books/'.length));
+    const fetchSpy = mockFetchRoutes({
+      '/api/books.json': Object.fromEntries(
+        records.map((r, i) => [`OLID:${olids[i]}`, { details: r }]),
+      ),
+      '/works/OL1W/editions.json': { size: records.length, entries: records },
+    });
+    const detail = await getOpenLibraryService().getEditionsByIdentifiers(
+      olids,
+      'olid',
+      createMockContext(),
+    );
+    const list = await getOpenLibraryService().getEditions('OL1W', 100, 0, createMockContext());
+    return { detail: detail.editions, list: list!.editions, fetchSpy };
+  }
+
+  /** The credit fields an edition carries, and nothing else. */
+  function credits(edition: object): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(edition).filter(([k]) => CREDIT_FIELDS.includes(k)));
+  }
+
+  beforeEach(() => initOpenLibraryService());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('keeps the existing edition fields, their order, and one request per route', async () => {
+    const { detail, list, fetchSpy } = await mapBoth([PEVEAR]);
+    const detailFields = [
+      'edition_id',
+      'title',
+      'authors',
+      'publish_date',
+      'edition_name',
+      'publishers',
+      'language',
+      'languages',
+      'isbn_10',
+      'isbn_13',
+      'oclc',
+      'lccn',
+      'lc_classifications',
+      'page_count',
+      'cover_ids',
+      'work_id',
+    ];
+    const listFields = [
+      'edition_id',
+      'title',
+      'publish_date',
+      'edition_name',
+      'publishers',
+      'languages',
+      'isbn_10',
+      'isbn_13',
+      'page_count',
+      'cover_ids',
+      'work_id',
+    ];
+    expect(Object.keys(detail[0]!).filter((k) => detailFields.includes(k))).toEqual(detailFields);
+    expect(Object.keys(list[0]!).filter((k) => listFields.includes(k))).toEqual(listFields);
+    expect(detail[0]).toMatchObject({
+      edition_id: 'OL7361482M',
+      authors: [{ name: 'Leo Tolstoy', author_id: 'OL26783A', source: 'edition' }],
+      languages: ['eng'],
+      page_count: 838,
+      work_id: 'OL267096W',
+    });
+    // One bibkeys request (authors are inline) and one editions page.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns both translators, the legacy credits, and the source language for ISBN 9780143035008', async () => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books.json': { 'ISBN:9780143035008': { details: PEVEAR } },
+    });
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['9780143035008'],
+      'isbn',
+      createMockContext(),
+    );
+    expect(credits(editions[0]!)).toEqual({
+      contributors: [
+        { name: 'Richard Pevear', role: 'Translator' },
+        { name: 'Larissa Volokhonsky', role: 'Translator' },
+      ],
+      contributions: ['Richard Pevear (Translator)', 'Larissa Volokhonsky (Translator)'],
+      translated_from: ['rus'],
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns both credit arrays of OL249260M in full and unmerged', async () => {
+    const { detail } = await mapBoth([KARAMAZOV]);
+    expect(credits(detail[0]!)).toEqual({
+      by_statement: KARAMAZOV.by_statement,
+      contributors: [{ name: 'E. Halpérine-Kaminsky', role: 'Translator' }],
+      contributions: [
+        'Halpérine-Kaminsky, E. 1858-1936, tr.',
+        'Morice, Charles, 1861-1919, joint tr.',
+      ],
+      translated_from: ['rus'],
+    });
+  });
+
+  it('maps the same records identically on the list and detail routes', async () => {
+    const { detail, list } = await mapBoth([PEVEAR, KARAMAZOV, NAKAMURA]);
+    expect(list.map(credits)).toEqual(detail.map(credits));
+    expect(credits(list[2]!)).toEqual({
+      subtitle: 'Anna Karenina',
+      by_statement: 'by Lev Tolstoi ; translated by Nakamura Hakuyō',
+      contributors: [{ name: 'Nakamura Hakuyō', role: 'Translator' }],
+      contributions: ['Nakamura, Hakuyō, 1890-1974, translator'],
+      translated_from: ['rus'],
+    });
+  });
+
+  it.each(
+    CREDIT_FIELDS.flatMap((field) =>
+      [
+        ['missing', undefined],
+        ['null', null],
+        ['""', ''],
+        ['[]', []],
+      ].map(([label, value]) => [field, label, value]),
+    ),
+  )('omits %s when it is %s, keeping the other credit fields', async (field, _label, value) => {
+    const record: RawRecord = {
+      key: NAKAMURA.key,
+      ...Object.fromEntries(Object.entries(NAKAMURA).filter(([k]) => k !== field)),
+      ...(value === undefined ? {} : { [field as string]: value }),
+    };
+    const { detail, list } = await mapBoth([record]);
+    for (const edition of [detail[0]!, list[0]!]) {
+      expect(edition).not.toHaveProperty(field as string);
+      for (const other of CREDIT_FIELDS.filter((f) => f !== field))
+        expect(edition).toHaveProperty(other);
+    }
+  });
+
+  it('skips contributors without a nonempty name, translated_from entries without a string key, and non-string credits', async () => {
+    const { detail, list } = await mapBoth([
+      {
+        key: '/books/OL1M',
+        contributors: [
+          { role: 'Translator', name: '' },
+          { role: 'Editor' },
+          { name: null, role: 'Editor' },
+          null,
+          'Bare string',
+          { name: 'Role-less' },
+          { name: 'Empty role', role: '' },
+          { name: 'Null role', role: null },
+          { name: 'With role', role: 'Illustrator' },
+        ],
+        translated_from: [
+          { key: '/languages/rus' },
+          {},
+          { key: 3 },
+          null,
+          '/languages/fre',
+          { key: '/languages/spa' },
+        ],
+        contributions: ['First credit', 3, null, '', 'Second credit'],
+      },
+      {
+        key: '/books/OL2M',
+        contributors: [{ name: '' }, { role: 'Editor' }],
+        translated_from: [{}, '/languages/rus'],
+        contributions: [null, ''],
+      },
+    ]);
+    for (const editions of [detail, list]) {
+      const [kept, emptied] = [editions[0]!, editions[1]!];
+      expect(credits(kept)).toEqual({
+        contributors: [
+          { name: 'Role-less' },
+          { name: 'Empty role' },
+          { name: 'Null role' },
+          { name: 'With role', role: 'Illustrator' },
+        ],
+        contributions: ['First credit', 'Second credit'],
+        translated_from: ['rus', 'spa'],
+      });
+      // A role that is absent or empty is left off the entry, never sent as "" or null.
+      for (const entry of (credits(kept).contributors as object[]).slice(0, 3))
+        expect(Object.keys(entry)).toEqual(['name']);
+      // Skipping every entry leaves the field absent.
+      expect(credits(emptied)).toEqual({});
+    }
+  });
+
+  it('passes strings through verbatim and never parses legacy credits into contributors', async () => {
+    const { detail, list } = await mapBoth([
+      {
+        key: '/books/OL1M',
+        subtitle: ' a *novel* ',
+        by_statement: '  Translated by A.C. Townsend\n',
+        contributions: [
+          'Garnett, Constance, 1861-1946, translator',
+          'Constance Garnett (Translator)',
+        ],
+      },
+    ]);
+    for (const edition of [detail[0]!, list[0]!]) {
+      expect(credits(edition)).toEqual({
+        subtitle: ' a *novel* ',
+        by_statement: '  Translated by A.C. Townsend\n',
+        contributions: [
+          'Garnett, Constance, 1861-1946, translator',
+          'Constance Garnett (Translator)',
+        ],
+      });
+    }
+  });
+});
+
+/**
+ * Each resolved row carries the caller's identifier exactly as supplied — the
+ * bibkey sent upstream is canonicalized for an ISBN, but the echo never is — so
+ * a caller can join rows back to its input even when the record does not carry
+ * that identifier.
+ */
+describe('OpenLibraryService — edition batch identifier echo', () => {
+  /** OL20525469M answers ISBN 9780441478125, though its own isbn_13 is empty. */
+  const LEFT_HAND = {
+    key: '/books/OL20525469M',
+    title: 'The Left Hand of Darkness',
+    isbn_10: ['0441478123'],
+    authors: [{ key: '/authors/OL31353A', name: 'Ursula K. Le Guin' }],
+  };
+
+  beforeEach(() => initOpenLibraryService());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('keeps one row per input that names the same edition, each with its own identifier', async () => {
+    mockFetchRoutes({
+      '/api/books.json': {
+        'ISBN:9780441478125': { details: LEFT_HAND },
+        'ISBN:0441478123': { details: LEFT_HAND },
+      },
+    });
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['9780441478125', '0441478123'],
+      'isbn',
+      createMockContext(),
+    );
+    expect(editions.map((e) => [e.identifier, e.edition_id])).toEqual([
+      ['9780441478125', 'OL20525469M'],
+      ['0441478123', 'OL20525469M'],
+    ]);
+    expect(editions[0]?.isbn_13).toEqual([]);
+    expect(unresolved).toEqual([]);
+  });
+
+  it.each([
+    ['a hyphenated ISBN', 'isbn' as const, '978-0-14-303500-8', 'ISBN:9780143035008'],
+    [
+      'an ISBN-10 with a lowercase check digit',
+      'isbn' as const,
+      '0-8044-2957-x',
+      'ISBN:080442957X',
+    ],
+    ['a lowercase OLID', 'olid' as const, 'ol7353617m', 'OLID:ol7353617m'],
+  ])('echoes %s exactly as supplied', async (_label, idType, identifier, bibkey) => {
+    const fetchSpy = mockFetchRoutes({
+      '/api/books.json': { [bibkey]: { details: { key: '/books/OL1M', title: 'Echoed' } } },
+    });
+    const { editions } = await getOpenLibraryService().getEditionsByIdentifiers(
+      [identifier],
+      idType,
+      createMockContext(),
+    );
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain(encodeURIComponent(bibkey));
+    expect(editions.map((e) => e.identifier)).toEqual([identifier]);
+  });
+
+  it('echoes only resolved inputs, leaving the misses in unresolved', async () => {
+    mockFetchRoutes({
+      '/api/books.json': { 'OLID:OL2M': { details: { key: '/books/OL2M', title: 'Second' } } },
+    });
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      ['OL1M', 'OL2M', 'OL3M'],
+      'olid',
+      createMockContext(),
+    );
+    expect(editions.map((e) => e.identifier)).toEqual(['OL2M']);
+    expect(unresolved).toEqual(['OL1M', 'OL3M']);
   });
 });
 
@@ -2130,12 +3625,13 @@ describe('OpenLibraryService — author lookups reject records of another type',
     expect((error as McpError).code).toBe(JsonRpcErrorCode.NotFound);
   });
 
-  // No input pattern narrows `author_id`: every form Open Library answers with
-  // an author record keeps resolving.
+  // No input pattern narrows `author_id`: every form that names an author keeps
+  // resolving. Open Library answers only the upper-case OLID, so a lowercase one
+  // is requested upper-cased.
   it.each([
     ['a bare OLID', 'OL23919A', '/authors/OL23919A.json'],
     ['an /authors/-prefixed OLID', '/authors/OL23919A', '/authors/OL23919A.json'],
-    ['a lowercase OLID the upstream answers', 'ol23919a', '/authors/ol23919a.json'],
+    ['a lowercase OLID', 'ol23919a', '/authors/OL23919A.json'],
   ])('openlibrary_get_author still resolves %s', async (_label, authorId, path) => {
     const fetchSpy = mockFetchRoutes({ [path]: LIVE_AUTHOR });
 
@@ -2146,6 +3642,183 @@ describe('OpenLibraryService — author lookups reject records of another type',
     expect(structured.author_id).toBe('OL23919A');
     expect(structured.name).toBe('J. K. Rowling');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Open Library's by-ID routes answer only the upper-case OLID — `/authors/ol31353a.json`,
+ * `/authors/ol31353a/works.json`, and `/works/ol45804w.json` all 404 — so an author or
+ * work ID shaped like that kind's OLID is upper-cased where it is normalized, and the
+ * merge-notice comparison sees the same canonical value. Every routed path below is
+ * the upper-case one, so a lowercase request falls through to the 404.
+ */
+describe('OpenLibraryService — OLID case canonicalization', () => {
+  const LE_GUIN = {
+    key: '/authors/OL31353A',
+    type: { key: '/type/author' },
+    name: 'Ursula K. Le Guin',
+    location: null,
+  };
+  const LE_GUIN_WORKS = {
+    size: 271,
+    entries: [{ key: '/works/OL59800W', title: 'A Wizard of Earthsea' }],
+  };
+  const FOX = { key: '/works/OL45804W', type: { key: '/type/work' }, title: 'Fantastic Mr Fox' };
+
+  const AUTHOR_FORMS = [
+    'ol31353a',
+    'Ol31353A',
+    'OL31353a',
+    'oL31353A',
+    '/authors/ol31353a',
+    'OL31353A',
+    '/authors/OL31353A',
+  ];
+
+  function contentText(result: { content: unknown[] }): string {
+    return result.content
+      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+      .join('\n');
+  }
+
+  function requestedUrls(fetchSpy: ReturnType<typeof vi.spyOn>): string[] {
+    return fetchSpy.mock.calls.map(([input]: unknown[]) => requestUrl(input));
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(AUTHOR_FORMS)(
+    'openlibrary_get_author resolves %s in one request with no merge notice',
+    async (authorId) => {
+      const fetchSpy = mockFetchRoutes({ '/authors/OL31353A.json': LE_GUIN });
+
+      const result = await runToolContract(openlibraryGetAuthor, { author_id: authorId });
+
+      expect(result.isError).toBeFalsy();
+      expect(openlibraryGetAuthor.output.parse(result.structuredContent).author_id).toBe(
+        'OL31353A',
+      );
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(contentText(result)).not.toContain('merged record');
+      expect(requestedUrls(fetchSpy)).toEqual(['https://openlibrary.org/authors/OL31353A.json']);
+    },
+  );
+
+  it.each(AUTHOR_FORMS)(
+    'openlibrary_get_author_works resolves %s in one request with no merge notice',
+    async (authorId) => {
+      const fetchSpy = mockFetchRoutes({ '/authors/OL31353A/works.json': LE_GUIN_WORKS });
+
+      const result = await runToolContract(openlibraryGetAuthorWorks, { author_id: authorId });
+
+      expect(result.isError).toBeFalsy();
+      const structured = openlibraryGetAuthorWorks.output.parse(result.structuredContent);
+      expect(structured.author_id).toBe('OL31353A');
+      expect(structured.total).toBe(271);
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(contentText(result)).not.toContain('merged record');
+      expect(requestedUrls(fetchSpy)).toEqual([
+        'https://openlibrary.org/authors/OL31353A/works.json?limit=20&offset=0',
+      ]);
+    },
+  );
+
+  it.each(AUTHOR_FORMS)('the author resource resolves %s in one request', async (authorId) => {
+    const fetchSpy = mockFetchRoutes({ '/authors/OL31353A.json': LE_GUIN });
+
+    const params = openlibraryAuthorResource.params!.parse({ author_id: authorId });
+    const ctx = createMockContext({
+      uri: new URL(`openlibrary://authors/${encodeURIComponent(authorId)}`),
+      errors: openlibraryAuthorResource.errors,
+    });
+    const author = await openlibraryAuthorResource.handler(params, ctx);
+
+    expect(author).toMatchObject({ author_id: 'OL31353A', name: 'Ursula K. Le Guin' });
+    expect(requestedUrls(fetchSpy)).toEqual(['https://openlibrary.org/authors/OL31353A.json']);
+  });
+
+  it.each(['ol45804w', 'Ol45804W', 'OL45804w', '/works/ol45804w', 'OL45804W', '/works/OL45804W'])(
+    'the work resource resolves %s in one request',
+    async (workId) => {
+      const fetchSpy = mockFetchRoutes({ '/works/OL45804W.json': FOX });
+
+      const params = openlibraryWorkResource.params!.parse({ work_id: workId });
+      const ctx = createMockContext({
+        uri: new URL(`openlibrary://works/${encodeURIComponent(workId)}`),
+        errors: openlibraryWorkResource.errors,
+      });
+      const work = await openlibraryWorkResource.handler(params, ctx);
+
+      expect(work).toMatchObject({ work_id: 'OL45804W', title: 'Fantastic Mr Fox' });
+      expect(requestedUrls(fetchSpy)).toEqual(['https://openlibrary.org/works/OL45804W.json']);
+    },
+  );
+
+  // Only an ID shaped like the record kind's own OLID changes: the permissive
+  // author_id keeps every other spelling, including another kind's OLID.
+  it.each(['31353', 'ol31353', 'olx31353a', 'ol31353ab', 'ol45804w', 'ol7353617m', 'abc'])(
+    'getAuthor sends the non-author-OLID %s unchanged',
+    async (authorId) => {
+      const fetchSpy = mockFetchRoutes({});
+
+      await expect(
+        getOpenLibraryService().getAuthor(authorId, createMockContext()),
+      ).resolves.toBeNull();
+      expect(requestedUrls(fetchSpy)).toEqual([`https://openlibrary.org/authors/${authorId}.json`]);
+    },
+  );
+
+  it.each(['45804', 'ol45804', 'olx45804w', 'ol45804wx', 'ol31353a', 'ol7353617m', 'abc'])(
+    'getWork sends the non-work-OLID %s unchanged',
+    async (workId) => {
+      const fetchSpy = mockFetchRoutes({});
+
+      await expect(
+        getOpenLibraryService().getWork(workId, createMockContext()),
+      ).resolves.toBeNull();
+      expect(requestedUrls(fetchSpy)).toEqual([`https://openlibrary.org/works/${workId}.json`]);
+    },
+  );
+
+  it('getAuthorWorks sends a non-author-OLID unchanged on both requests', async () => {
+    const fetchSpy = mockFetchRoutes({});
+
+    await expect(
+      getOpenLibraryService().getAuthorWorks('ol45804w', 10, 0, createMockContext()),
+    ).resolves.toBeNull();
+    expect(requestedUrls(fetchSpy)).toEqual([
+      'https://openlibrary.org/authors/ol45804w/works.json?limit=10&offset=0',
+      'https://openlibrary.org/authors/ol45804w.json',
+    ]);
+  });
+
+  // The bibkeys route matches LCCNs case-sensitively the other way — LCCN:sn84003854
+  // resolves and LCCN:SN84003854 matches nothing — and resolves an OLID in any case,
+  // so edition lookups keep the caller's spelling in the request and the echo.
+  it.each([
+    ['lccn' as const, 'sn84003854', 'LCCN:sn84003854'],
+    ['olid' as const, 'ol7353617m', 'OLID:ol7353617m'],
+    ['oclc' as const, 'ocm1037812', 'OCLC:ocm1037812'],
+  ])('edition lookup by %s keeps %s as supplied', async (idType, identifier, bibkey) => {
+    const fetchSpy = mockFetchRoutes({ '/api/books': {} });
+
+    const { editions, unresolved } = await getOpenLibraryService().getEditionsByIdentifiers(
+      [identifier],
+      idType,
+      createMockContext(),
+    );
+
+    expect(requestUrl(fetchSpy.mock.calls[0]?.[0])).toContain(
+      `bibkeys=${encodeURIComponent(bibkey)}&`,
+    );
+    expect(editions).toEqual([]);
+    expect(unresolved).toEqual([identifier]);
   });
 });
 

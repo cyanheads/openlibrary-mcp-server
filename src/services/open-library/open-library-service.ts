@@ -14,16 +14,20 @@ import {
 import { defaultIsTransient, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { normalizeLanguageCode } from './language-codes.js';
+import { bookSearchCriteria } from './search-criteria.js';
 import type {
   AuthorDetail,
   AuthorLookupGaps,
   AuthorSearchResult,
   AuthorWork,
   EditionAuthor,
+  EditionContributor,
+  EditionCredits,
   EditionDetail,
   EditionIdType,
   EditionSummary,
   InsideMatch,
+  ResolvedEdition,
   SearchWork,
   SubjectWork,
   WorkAvailability,
@@ -67,6 +71,9 @@ export const RETRY_DEADLINE_MS = 50_000;
 /** `data.errorSource` on the error {@link OpenLibraryService.fetch} raises for a 2xx HTML page. */
 const HTML_BODY_ERROR_SOURCE = 'UpstreamHtmlBody';
 
+/** `data.errorSource` on the error {@link OpenLibraryService.fetch} raises for a 2xx body that is neither JSON nor HTML. */
+const NON_JSON_BODY_ERROR_SOURCE = 'UpstreamNonJsonBody';
+
 /**
  * Gateway statuses Open Library's front end answers with when its backends are
  * saturated or down (HAProxy's `No server is available` page is a 503).
@@ -84,8 +91,8 @@ const GATEWAY_FAILURE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
  * ladder too: that attempt already spent most of the deadline, and a re-issue
  * re-runs the most expensive query the upstream serves. Everything else keeps
  * the framework's classification — a 429 honoring its `Retry-After`, a network
- * failure, and a timed-out record or search attempt all retry within the
- * deadline.
+ * failure, a timed-out record or search attempt, and a truncated or other
+ * non-JSON body all retry within the deadline.
  */
 function isTransientFor(endpointClass: EndpointClass): (error: unknown) => boolean {
   return (error) => {
@@ -104,14 +111,16 @@ function isTransientFor(endpointClass: EndpointClass): (error: unknown) => boole
  * True when an error from the bibkeys route is an upstream fault rather than an
  * answer. That route reports an unknown identifier by omitting its key from a
  * 200 map — it never 404s for a missing edition — so any HTTP error status is a
- * fault, as is an HTML page. A 429 is the exception: it stays `RateLimited`,
- * carrying the `Retry-After` the caller should wait out.
+ * fault, as is an HTML page or any other body that is not JSON. A 429 is the
+ * exception: it stays `RateLimited`, carrying the `Retry-After` the caller
+ * should wait out.
  */
 function isBibkeysRouteFault(error: unknown): error is McpError {
   if (!(error instanceof McpError)) return false;
   const status = error.data?.status;
   if (typeof status === 'number') return status !== 429;
-  return error.data?.errorSource === HTML_BODY_ERROR_SOURCE;
+  const errorSource = error.data?.errorSource;
+  return errorSource === HTML_BODY_ERROR_SOURCE || errorSource === NON_JSON_BODY_ERROR_SOURCE;
 }
 
 /** Bibkey prefix `/api/books.json` expects for each identifier type. */
@@ -186,34 +195,48 @@ class ConcurrencyGate {
   }
 }
 
-/** How one gated enrichment lookup ended. */
+/** How one gated best-effort lookup ended. */
 type LookupOutcome<T> = { status: 'ok'; value: T } | { status: 'failed' | 'skipped' };
 
 /**
- * Per-batch state for the author lookups an edition batch fans out: the
- * concurrency gate, whether a lookup has failed yet, and the batch's share of
- * the call's time budget.
+ * Per-batch state for a fan-out of secondary lookups (an edition batch's author
+ * lookups, a search page's availability lookups): the concurrency gate, whether a
+ * lookup has failed yet, and the batch's share of the call's time budget.
  *
- * Enrichment is best-effort. A failed lookup degrades its own edition instead of
- * failing the batch, and once one has failed, every lookup not yet started is
+ * The lookups are best-effort. A failed lookup degrades its own results instead
+ * of failing the call, and once one has failed, every lookup not yet started is
  * skipped — a failure mid-batch almost always means the upstream is struggling,
  * and dozens more requests would only wait out the same fault one ladder at a
- * time. Lookups already in flight finish normally. Each lookup runs against
- * `deadlineAt`, so the whole call, bibkeys request included, ends inside one
+ * time. Lookups already in flight finish normally. A lookup that would start with
+ * nothing left of `deadlineAt` is skipped too, so the whole call ends inside one
  * {@link RETRY_DEADLINE_MS}.
  *
  * A caller that cancels is never absorbed as a failure: its abort propagates.
  */
-class EnrichmentBatch {
-  private readonly gate = new ConcurrencyGate(EDITION_ENRICHMENT_CONCURRENCY);
+class BestEffortBatch {
+  private readonly gate: ConcurrencyGate;
+  private readonly deadlineAt: number;
+  private readonly ctx: Context;
+  private readonly failureMessage: string;
   private failed = false;
 
-  constructor(
-    private readonly deadlineAt: number,
-    private readonly ctx: Context,
-  ) {}
+  constructor(options: {
+    concurrency: number;
+    deadlineAt: number;
+    ctx: Context;
+    /** The warning logged when a lookup fails. */
+    failureMessage: string;
+  }) {
+    this.gate = new ConcurrencyGate(options.concurrency);
+    this.deadlineAt = options.deadlineAt;
+    this.ctx = options.ctx;
+    this.failureMessage = options.failureMessage;
+  }
 
-  run<T>(lookup: (deadlineAt: number) => Promise<T>): Promise<LookupOutcome<T>> {
+  run<T>(
+    lookup: (deadlineAt: number) => Promise<T>,
+    logFields: Record<string, unknown> = {},
+  ): Promise<LookupOutcome<T>> {
     return this.gate.run(async (): Promise<LookupOutcome<T>> => {
       if (this.failed || Date.now() >= this.deadlineAt) return { status: 'skipped' };
       try {
@@ -221,7 +244,8 @@ class EnrichmentBatch {
       } catch (err) {
         if (this.ctx.signal.aborted) throw err;
         this.failed = true;
-        this.ctx.log.warning('Edition author lookup failed; skipping lookups not yet started', {
+        this.ctx.log.warning(this.failureMessage, {
+          ...logFields,
           error: err instanceof Error ? err.message : String(err),
         });
         return { status: 'failed' };
@@ -240,8 +264,61 @@ function worstGap(statuses: Array<LookupOutcome<unknown>['status']>): AuthorLook
   return;
 }
 
+/**
+ * The credit fields an edition record carries, identical on `editions.json`
+ * entries and `/api/books.json` details. Untrusted shapes, checked by
+ * {@link editionCredits}.
+ */
+type RawEditionCredits = {
+  subtitle?: unknown;
+  by_statement?: unknown;
+  contributors?: unknown;
+  contributions?: unknown;
+  translated_from?: unknown;
+};
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/** An upstream array's entries, or none when the field is not an array. */
+function arrayEntries(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * Maps an edition's title and credit fields verbatim — one mapping for both
+ * edition routes, so the list and the detail carry the same values. Each field
+ * is omitted when missing, null, empty, or left empty once unusable entries are
+ * skipped: a contributor needs a nonempty `name` (a missing or empty `role` is
+ * left off the entry), a `translated_from` entry needs a `key`, and a legacy
+ * credit must be a nonempty string. Legacy credits are never parsed for names
+ * or roles.
+ */
+function editionCredits(raw: RawEditionCredits): EditionCredits {
+  const contributors = arrayEntries(raw.contributors).flatMap((entry): EditionContributor[] => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const { name, role } = entry as { name?: unknown; role?: unknown };
+    if (!isNonEmptyString(name)) return [];
+    return [isNonEmptyString(role) ? { name, role } : { name }];
+  });
+  const contributions = arrayEntries(raw.contributions).filter(isNonEmptyString);
+  const translatedFrom = arrayEntries(raw.translated_from).flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const { key } = entry as { key?: unknown };
+    return isNonEmptyString(key) ? [extractLanguageCode(key)] : [];
+  });
+  return {
+    ...(isNonEmptyString(raw.subtitle) ? { subtitle: raw.subtitle } : {}),
+    ...(isNonEmptyString(raw.by_statement) ? { by_statement: raw.by_statement } : {}),
+    ...(contributors.length ? { contributors } : {}),
+    ...(contributions.length ? { contributions } : {}),
+    ...(translatedFrom.length ? { translated_from: translatedFrom } : {}),
+  };
+}
+
 /** The `details` payload `/api/books.json?jscmd=details` returns per resolved bibkey. */
-type RawEditionDetails = {
+type RawEditionDetails = RawEditionCredits & {
   key?: string;
   title?: string;
   authors?: Array<{ key: string; name?: string }>;
@@ -343,14 +420,36 @@ function matchingEdition(
   };
 }
 
-/** Normalizes an author identifier to its bare OLID form ("/authors/OL24638A" → "OL24638A"). */
-export function normalizeAuthorId(authorId: string): string {
-  return stripPrefix(authorId, '/authors/');
+/** An author OLID in any case. */
+const AUTHOR_OLID = /^OL\d+A$/i;
+
+/** A work OLID in any case. */
+const WORK_OLID = /^OL\d+W$/i;
+
+/**
+ * Upper-cases `id` when it has `shape`, the OLID shape of one record kind. Open
+ * Library's by-ID routes and the Covers API answer only the upper-case form
+ * (`/authors/ol31353a.json` 404s), while every other string passes through as
+ * supplied, so the permissive ID inputs keep their spelling.
+ */
+function canonicalOlid(id: string, shape: RegExp): string {
+  return shape.test(id) ? id.toUpperCase() : id;
 }
 
-/** Normalizes a work identifier to its bare OLID form ("/works/OL45804W" → "OL45804W"). */
+/**
+ * Normalizes an author identifier to its bare OLID form ("/authors/ol24638a" →
+ * "OL24638A"). An ID that is not shaped like an author OLID keeps its spelling.
+ */
+export function normalizeAuthorId(authorId: string): string {
+  return canonicalOlid(stripPrefix(authorId, '/authors/'), AUTHOR_OLID);
+}
+
+/**
+ * Normalizes a work identifier to its bare OLID form ("/works/ol45804w" →
+ * "OL45804W"). An ID that is not shaped like a work OLID keeps its spelling.
+ */
 export function normalizeWorkId(workId: string): string {
-  return stripPrefix(workId, '/works/');
+  return canonicalOlid(stripPrefix(workId, '/works/'), WORK_OLID);
 }
 
 /**
@@ -437,6 +536,58 @@ function toWorkAvailability(raw: unknown): WorkAvailability | null {
   }
   return availability;
 }
+
+/**
+ * Most work keys one availability lookup names. A 100-key lookup's URL runs to
+ * about 3.3 KB, well inside what Open Library's front end accepts, and a
+ * full 1000-row page then costs at most ten lookups.
+ */
+const AVAILABILITY_LOOKUP_KEYS = 100;
+
+/**
+ * How many availability lookups one search has in flight at once. Each makes
+ * Open Library ask the Internet Archive about up to 100 items, so a full page's
+ * lookups are trickled through rather than issued in one tick; three at a time
+ * finish a full page's lookups in under half the time they take one after
+ * another.
+ */
+const AVAILABILITY_LOOKUP_CONCURRENCY = 3;
+
+/**
+ * Pause before re-asking about works the Internet Archive gave no answer for. Its availability
+ * service fails in bursts: in November 2026 sampling an immediate re-ask recovered none of the
+ * failed batches it repeated, while the same keys asked again seconds later answered in full.
+ */
+const AVAILABILITY_REASK_DELAY_MS = 2000;
+
+/** Resolves after `ms`, or rejects with the signal's reason as soon as it aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * A keyed availability lookup's answer: each matched work's key and lending
+ * payload. `availability` is left out for a work with no scan the Internet
+ * Archive lends and `null` when the Internet Archive gave no answer, so absent
+ * and `null` stay distinct.
+ */
+const availabilityLookupSchema = z.object({
+  docs: z.array(z.object({ key: z.string(), availability: z.unknown().optional() })),
+});
 
 /**
  * An edition's OCLC numbers from both keys Open Library files them under. Most
@@ -538,6 +689,8 @@ type MergeChain = {
   label: 'Work' | 'Author';
   /** Path the records live under, and the prefix stripped from their keys. */
   prefix: '/works/' | '/authors/';
+  /** Brings a requested ID to the form the record kind's routes answer. */
+  normalize: (id: string) => string;
   maxHops: number;
   /**
    * The shape a stub's `location` must have, prefix stripped, to be followed. A
@@ -558,14 +711,16 @@ type MergeChain = {
 const AUTHOR_MERGES: MergeChain = {
   label: 'Author',
   prefix: '/authors/',
+  normalize: normalizeAuthorId,
   maxHops: MAX_AUTHOR_REDIRECT_HOPS,
-  targetPattern: /^OL\d+A$/i,
+  targetPattern: AUTHOR_OLID,
   recordType: '/type/author',
 };
 
 const WORK_MERGES: MergeChain = {
   label: 'Work',
   prefix: '/works/',
+  normalize: normalizeWorkId,
   maxHops: MAX_WORK_REDIRECT_HOPS,
   targetPattern: /^OL\d+W$/,
   recordType: '/type/work',
@@ -675,7 +830,16 @@ export class OpenLibraryService {
             { errorSource: HTML_BODY_ERROR_SOURCE },
           );
         }
-        return JSON.parse(text) as T;
+        // A raw SyntaxError would reach the caller classified as their ValidationError.
+        try {
+          return JSON.parse(text) as T;
+        } catch (cause) {
+          throw serviceUnavailable(
+            'Open Library answered with a body that is not JSON.',
+            { errorSource: NON_JSON_BODY_ERROR_SOURCE },
+            { cause },
+          );
+        }
       },
       {
         operation: 'OpenLibrary.fetch',
@@ -748,7 +912,7 @@ export class OpenLibraryService {
     deadlineAt: number,
   ): Promise<{ raw: R; canonicalId: string } | null> {
     const idKey = `${chain.label.toLowerCase()}Id`;
-    let id = stripPrefix(requestedId, chain.prefix);
+    let id = chain.normalize(requestedId);
     if (chain.prefix === '/authors/' && id.length === 0) return null;
     // A re-merge can point back at an ID already visited; stopping on a repeat
     // fails a cycle closed immediately instead of burning the whole hop budget.
@@ -793,7 +957,7 @@ export class OpenLibraryService {
     }
 
     ctx.log.warning(`${chain.label} redirect chain exceeded the hop cap`, {
-      [idKey]: stripPrefix(requestedId, chain.prefix),
+      [idKey]: chain.normalize(requestedId),
       maxHops: chain.maxHops,
     });
     return null;
@@ -801,6 +965,12 @@ export class OpenLibraryService {
 
   // ─── Search ───────────────────────────────────────────────────────────────────
 
+  /**
+   * One page of works. With `include_availability`, keyed lookups after the page
+   * request read each work's availability; `availabilityUnknown` names, in page
+   * order, the works whose lookup failed, ran out of time, or came back without
+   * an Internet Archive answer, so their `null` is not "none returned".
+   */
   async searchBooks(
     params: {
       query?: string | undefined;
@@ -816,15 +986,22 @@ export class OpenLibraryService {
       include_availability?: boolean | undefined;
     },
     ctx: Context,
-  ): Promise<{ total: number; offset: number; works: SearchWork[] }> {
+  ): Promise<{
+    total: number;
+    offset: number;
+    works: SearchWork[];
+    availabilityUnknown?: string[];
+  }> {
     const qs = new URLSearchParams();
 
-    if (params.query) qs.set('q', params.query);
-    if (params.title) qs.set('title', params.title);
-    if (params.author) qs.set('author', params.author);
-    if (params.subject) qs.set('subject', params.subject);
-    if (params.publisher) qs.set('publisher', params.publisher);
-    if (params.isbn) qs.set('isbn', params.isbn.replace(/-/g, ''));
+    // A blank criterion is absent: upstream answers a whitespace-only one with HTTP 500.
+    const criteria = bookSearchCriteria(params);
+    if (criteria.query !== undefined) qs.set('q', criteria.query);
+    if (criteria.title !== undefined) qs.set('title', criteria.title);
+    if (criteria.author !== undefined) qs.set('author', criteria.author);
+    if (criteria.subject !== undefined) qs.set('subject', criteria.subject);
+    if (criteria.publisher !== undefined) qs.set('publisher', criteria.publisher);
+    if (criteria.isbn !== undefined) qs.set('isbn', criteria.isbn.replace(/-/g, ''));
     // `language=` is the result filter and takes 3-letter MARC codes; `lang=` is
     // Open Library's UI-language parameter and filters nothing.
     if (params.language) qs.set('language', normalizeLanguageCode(params.language));
@@ -835,14 +1012,20 @@ export class OpenLibraryService {
     qs.set('limit', String(params.limit));
     qs.set('offset', String(params.offset));
 
-    const baseFields =
-      'key,title,author_name,author_key,first_publish_year,edition_count,cover_i,subject,ebook_access,has_fulltext,ratings_average,ia,editions,editions.key,editions.title,editions.language,editions.publisher';
-    const fields = params.include_availability ? `${baseFields},availability` : baseFields;
-    qs.set('fields', fields);
+    // No `availability` here: with `editions` in the field list Open Library
+    // attaches it to the selected edition instead of the work, so work-level
+    // availability comes from a keyed lookup after this request.
+    qs.set(
+      'fields',
+      'key,title,author_name,author_key,first_publish_year,edition_count,cover_i,subject,ebook_access,has_fulltext,ratings_average,ia,editions,editions.key,editions.title,editions.language,editions.publisher',
+    );
 
     const url = `${BASE_URL}/search.json?${qs.toString()}`;
     ctx.log.debug('Searching books', { url });
 
+    // The page request's ladder starts now with the full budget, so this is its
+    // deadline too; the availability lookups get what it leaves.
+    const deadlineAt = Date.now() + RETRY_DEADLINE_MS;
     const raw = await this.fetch<{
       numFound: number;
       start: number;
@@ -858,7 +1041,6 @@ export class OpenLibraryService {
         ebook_access?: string;
         has_fulltext?: boolean;
         ratings_average?: number;
-        availability?: unknown;
         ia?: string[];
         editions?: unknown;
       }>;
@@ -897,19 +1079,149 @@ export class OpenLibraryService {
         ebook_access: ebookAccess,
         has_fulltext: doc.has_fulltext ?? false,
         ...(typeof doc.ratings_average === 'number' && { ratings_average: doc.ratings_average }),
-        availability: params.include_availability
-          ? toWorkAvailability(doc.availability)
-          : undefined,
         ia_identifiers: doc.ia ?? [],
         ...matchingEdition(doc.editions),
       };
     });
 
+    if (!params.include_availability) return { total: raw.numFound, offset: raw.start, works };
+
+    // Only a work with an IA item can have availability, and only an OLID-shaped
+    // key is spliced into the lookup's quoted query.
+    const { found, unknown } = await this.lookupAvailability(
+      works
+        .filter((work) => work.ia_identifiers.length > 0 && WORK_OLID.test(work.work_id))
+        .map((work) => work.work_id),
+      ctx,
+      deadlineAt,
+    );
+    for (const work of works) work.availability = toWorkAvailability(found.get(work.work_id));
+    const availabilityUnknown = works
+      .filter((work) => unknown.has(work.work_id))
+      .map((work) => work.work_id);
+
     return {
       total: raw.numFound,
       offset: raw.start,
       works,
+      ...(availabilityUnknown.length > 0 && { availabilityUnknown }),
     };
+  }
+
+  /**
+   * Reads work-level availability for `workIds` through keyed `/search.json`
+   * lookups — `q=key:("/works/OL…W" OR …)`, at most
+   * {@link AVAILABILITY_LOOKUP_KEYS} works each, run
+   * {@link AVAILABILITY_LOOKUP_CONCURRENCY} at a time.
+   *
+   * Availability is a secondary read, so it never fails the search. A lookup that
+   * fails — an HTTP error, an HTML page, a body of another shape, a ladder that
+   * ran out — leaves its works unknown, and once one has failed, lookups not yet
+   * started are skipped and their works unknown too: a failure almost always
+   * means the upstream is struggling, and the page in hand is worth more than
+   * waiting out the same fault once per lookup. Every lookup runs against
+   * `deadlineAt`, the budget the page request started, and one that would start
+   * with nothing left is skipped. A caller that cancels is never absorbed: its
+   * abort propagates.
+   *
+   * A lookup can also answer 200 with a work's `availability` set to `null`:
+   * Open Library asked the Internet Archive about the work's scan and got no
+   * answer (its availability service reports failure for the whole batch). Those
+   * works are asked about once more, after every first lookup has settled and
+   * {@link AVAILABILITY_REASK_DELAY_MS} has passed, one re-ask at a time; a work
+   * still `null` is unknown too. A work whose answer leaves `availability` out
+   * has no scan the Internet Archive lends — "none returned", not unknown.
+   *
+   * Returns each answered work's raw lending payload by work ID, and the IDs
+   * whose availability is unknown.
+   */
+  private async lookupAvailability(
+    workIds: string[],
+    ctx: Context,
+    deadlineAt: number,
+  ): Promise<{ found: Map<string, unknown>; unknown: Set<string> }> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < workIds.length; i += AVAILABILITY_LOOKUP_KEYS) {
+      chunks.push(workIds.slice(i, i + AVAILABILITY_LOOKUP_KEYS));
+    }
+
+    const request = async (ids: string[]) => {
+      const qs = new URLSearchParams({
+        q: `key:(${ids.map((id) => `"/works/${id}"`).join(' OR ')})`,
+        // Open Library reads availability off a work's `ia` items, so it
+        // returns none unless `ia` is requested too.
+        fields: 'key,ia,availability',
+        limit: String(ids.length),
+      });
+      const raw = await this.fetch<unknown>(
+        `${BASE_URL}/search.json?${qs.toString()}`,
+        ctx,
+        'search',
+        {
+          deadlineMs: deadlineAt - Date.now(),
+        },
+      );
+      return availabilityLookupSchema.parse(raw).docs;
+    };
+
+    const batch = new BestEffortBatch({
+      concurrency: AVAILABILITY_LOOKUP_CONCURRENCY,
+      deadlineAt,
+      ctx,
+      failureMessage: 'Search availability lookup failed; skipping lookups not yet started',
+    });
+    const answers = await Promise.all(
+      chunks.map(async (chunk) => {
+        const outcome = await batch.run(() => request(chunk), { works: chunk.length });
+        return outcome.status === 'ok' ? { chunk, docs: outcome.value } : { chunk };
+      }),
+    );
+
+    const found = new Map<string, unknown>();
+    const unknown = new Set<string>();
+    const unanswered: string[] = [];
+    for (const { chunk, docs } of answers) {
+      if (!docs) {
+        for (const id of chunk) unknown.add(id);
+        continue;
+      }
+      for (const doc of docs) {
+        const id = stripPrefix(doc.key, '/works/');
+        if (doc.availability === null) unanswered.push(id);
+        else found.set(id, doc.availability);
+      }
+    }
+    if (unanswered.length === 0) return { found, unknown };
+
+    // With no time left for the pause, the works stay unknown rather than overrun the deadline.
+    if (deadlineAt - Date.now() <= AVAILABILITY_REASK_DELAY_MS) {
+      for (const id of unanswered) unknown.add(id);
+      return { found, unknown };
+    }
+    await pause(AVAILABILITY_REASK_DELAY_MS, ctx.signal);
+    const reask = new BestEffortBatch({
+      concurrency: 1,
+      deadlineAt,
+      ctx,
+      failureMessage: 'Search availability re-ask failed; skipping re-asks not yet started',
+    });
+    ctx.log.debug('Re-asking availability for works the Internet Archive did not answer', {
+      works: unanswered.length,
+    });
+    for (let i = 0; i < unanswered.length; i += AVAILABILITY_LOOKUP_KEYS) {
+      const ids = unanswered.slice(i, i + AVAILABILITY_LOOKUP_KEYS);
+      const outcome = await reask.run(() => request(ids), { works: ids.length });
+      const retried =
+        outcome.status === 'ok'
+          ? new Map(outcome.value.map((doc) => [stripPrefix(doc.key, '/works/'), doc]))
+          : undefined;
+      for (const id of ids) {
+        const doc = retried?.get(id);
+        if (doc && doc.availability !== null) found.set(id, doc.availability);
+        else unknown.add(id);
+      }
+    }
+    return { found, unknown };
   }
 
   // ─── Works ────────────────────────────────────────────────────────────────────
@@ -1003,20 +1315,22 @@ export class OpenLibraryService {
 
     const raw = await this.fetchOrNull<{
       size: number;
-      entries: Array<{
-        key: string;
-        title?: string;
-        publish_date?: string;
-        physical_format?: unknown;
-        edition_name?: unknown;
-        publishers?: string[];
-        languages?: Array<{ key: string }>;
-        isbn_10?: string[];
-        isbn_13?: string[];
-        number_of_pages?: number;
-        covers?: number[];
-        works?: Array<{ key: string }>;
-      }>;
+      entries: Array<
+        RawEditionCredits & {
+          key: string;
+          title?: string;
+          publish_date?: string;
+          physical_format?: unknown;
+          edition_name?: unknown;
+          publishers?: string[];
+          languages?: Array<{ key: string }>;
+          isbn_10?: string[];
+          isbn_13?: string[];
+          number_of_pages?: number;
+          covers?: number[];
+          works?: Array<{ key: string }>;
+        }
+      >;
     }>(url, ctx, deadlineAt);
 
     if (!raw?.entries) return null;
@@ -1024,6 +1338,7 @@ export class OpenLibraryService {
     const editions: EditionSummary[] = raw.entries.map((e) => ({
       edition_id: stripPrefix(e.key ?? '', '/books/'),
       title: e.title ?? '',
+      ...editionCredits(e),
       ...(e.publish_date ? { publish_date: e.publish_date } : {}),
       ...(typeof e.physical_format === 'string' && e.physical_format.length > 0
         ? { physical_format: e.physical_format }
@@ -1067,7 +1382,7 @@ export class OpenLibraryService {
   private async workAuthors(
     workKey: string,
     ctx: Context,
-    batch: EnrichmentBatch,
+    batch: BestEffortBatch,
   ): Promise<{ authors: EditionAuthor[]; gap?: AuthorLookupGap }> {
     const work = await batch.run((deadlineAt) =>
       this.followMergeRedirects<RawWorkRecord>(WORK_MERGES, workKey, ctx, deadlineAt),
@@ -1107,7 +1422,7 @@ export class OpenLibraryService {
   private async toEditionDetail(
     d: RawEditionDetails,
     ctx: Context,
-    batch: EnrichmentBatch,
+    batch: BestEffortBatch,
   ): Promise<{ edition: EditionDetail; gap?: AuthorLookupGap }> {
     // This route embeds author names inline; only the work-level fallback needs
     // secondary lookups.
@@ -1127,6 +1442,7 @@ export class OpenLibraryService {
       edition_id: stripPrefix(d.key ?? '', '/books/'),
       title: d.title ?? '',
       authors: fallback?.authors ?? inlineAuthors,
+      ...editionCredits(d),
       ...(d.publish_date ? { publish_date: d.publish_date } : {}),
       ...(typeof d.physical_format === 'string' && d.physical_format.length > 0
         ? { physical_format: d.physical_format }
@@ -1173,8 +1489,14 @@ export class OpenLibraryService {
     } catch (err) {
       if (!isBibkeysRouteFault(err)) throw err;
       const status = err.data?.status;
+      const fault =
+        typeof status === 'number'
+          ? `HTTP ${status}`
+          : err.data?.errorSource === HTML_BODY_ERROR_SOURCE
+            ? 'an HTML page instead of JSON'
+            : 'a body that is not JSON';
       throw serviceUnavailable(
-        `Open Library's edition lookup failed upstream${typeof status === 'number' ? ` with HTTP ${status}` : ' with an HTML page instead of JSON'}.`,
+        `Open Library's edition lookup failed upstream with ${fault}.`,
         {
           reason: 'upstream_unavailable',
           retryable: true,
@@ -1198,21 +1520,24 @@ export class OpenLibraryService {
    * an error.
    *
    * Editions whose authors are only recorded on the parent work still need
-   * per-edition lookups. Those run through one {@link EnrichmentBatch}, so a
+   * per-edition lookups. Those run through one {@link BestEffortBatch}, so a
    * 50-identifier request tapers its follow-up traffic, stops issuing lookups
    * once one has failed, and finishes — bibkeys request included — inside one
    * {@link RETRY_DEADLINE_MS}. `authorGaps` names the editions whose authors
    * are incomplete because of that.
+   *
+   * Each resolved row echoes its input as `identifier`, so two inputs naming one
+   * edition come back as two rows the caller can tell apart.
    */
   async getEditionsByIdentifiers(
     identifiers: string[],
     idType: EditionIdType,
     ctx: Context,
-  ): Promise<{ editions: EditionDetail[]; unresolved: string[]; authorGaps: AuthorLookupGaps }> {
+  ): Promise<{ editions: ResolvedEdition[]; unresolved: string[]; authorGaps: AuthorLookupGaps }> {
     const deadlineAt = Date.now() + RETRY_DEADLINE_MS;
     // Keep the caller's identifier alongside the key sent upstream: the response
     // is keyed by the bibkey, which differs from the input for a hyphenated ISBN
-    // or a lowercase `x` check digit.
+    // or a lowercase `x` check digit, and the identifier is what each row echoes.
     const requested = identifiers.map((identifier) => ({
       identifier,
       bibkey: `${BIBKEY_PREFIX[idType]}:${idType === 'isbn' ? canonicalIsbn(identifier) : identifier}`,
@@ -1223,7 +1548,12 @@ export class OpenLibraryService {
     const url = `${BASE_URL}/api/books.json?bibkeys=${encodeURIComponent(bibkeys)}&format=json&jscmd=details`;
     const rawMap = await this.fetchEditionMap(url, ctx);
 
-    const batch = new EnrichmentBatch(deadlineAt, ctx);
+    const batch = new BestEffortBatch({
+      concurrency: EDITION_ENRICHMENT_CONCURRENCY,
+      deadlineAt,
+      ctx,
+      failureMessage: 'Edition author lookup failed; skipping lookups not yet started',
+    });
     const resolved = await Promise.all(
       requested.map(
         async ({
@@ -1237,7 +1567,7 @@ export class OpenLibraryService {
       ),
     );
 
-    const editions: EditionDetail[] = [];
+    const editions: ResolvedEdition[] = [];
     const unresolved: string[] = [];
     const authorGaps: AuthorLookupGaps = { failed: [], skipped: [] };
     for (const { identifier, edition, gap } of resolved) {
@@ -1245,7 +1575,7 @@ export class OpenLibraryService {
         unresolved.push(identifier);
         continue;
       }
-      editions.push(edition);
+      editions.push({ identifier, ...edition });
       if (gap) authorGaps[gap].push(edition.edition_id);
     }
     return { editions, unresolved, authorGaps };
@@ -1446,7 +1776,7 @@ export class OpenLibraryService {
    * The works subresource of a merged author 404s even though the author record
    * itself answers 200, so a null page is ambiguous between "no such author" and
    * "this ID was merged away". Only that path pays for the author lookup that
-   * tells the two apart — a live author costs exactly one request, as before.
+   * tells the two apart — a live author costs exactly one request.
    * Every request of the call — direct page, redirect hops, canonical page —
    * shares one {@link RETRY_DEADLINE_MS}.
    *
@@ -1484,6 +1814,9 @@ export class OpenLibraryService {
    * echoing the requested key back as `name` with `work_count: 0` and no works,
    * so an unknown subject is an empty result rather than an absent record — this
    * never resolves to `null`, and callers have no not-found path to take.
+   *
+   * `subject_type` is Open Library's reading of the key: `place`, `person`, or
+   * `time` for a recognized browse prefix, `subject` otherwise.
    */
   async getSubject(
     subject: string,
@@ -1493,10 +1826,17 @@ export class OpenLibraryService {
   ): Promise<{
     subject_name: string;
     subject_key: string;
+    subject_type?: string;
     work_count: number;
     works: SubjectWork[];
   }> {
-    const subjectKey = subject.trim().toLowerCase().replace(/\s+/g, '_');
+    const lowered = subject.trim().toLowerCase();
+    // Whitespace after a browse prefix's colon would join the value as an
+    // underscore ("place:_london") and match nothing.
+    const prefix = ['place:', 'person:', 'time:'].find((p) => lowered.startsWith(p));
+    const subjectKey = (
+      prefix ? prefix + lowered.slice(prefix.length).trimStart() : lowered
+    ).replace(/\s+/g, '_');
     const qs = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
@@ -1507,6 +1847,7 @@ export class OpenLibraryService {
     const raw = await this.fetch<{
       name?: string;
       key?: string;
+      subject_type?: unknown;
       work_count?: number;
       works?: Array<{
         key: string;
@@ -1520,6 +1861,7 @@ export class OpenLibraryService {
     return {
       subject_name: raw.name ?? subject,
       subject_key: subjectKey,
+      ...(typeof raw.subject_type === 'string' && { subject_type: raw.subject_type }),
       work_count: raw.work_count ?? 0,
       works: (raw.works ?? []).map((w) => ({
         work_id: stripPrefix(w.key ?? '', '/works/'),
@@ -1560,7 +1902,14 @@ export class OpenLibraryService {
       });
     }
     const prefix = target === 'author' ? 'a' : 'b';
-    const clean = idType === 'isbn' ? canonicalIsbn(identifier) : identifier;
+    // The Covers API matches an OLID only in upper case — any other case serves
+    // the placeholder — and the check above has already confirmed the shape.
+    const clean =
+      idType === 'isbn'
+        ? canonicalIsbn(identifier)
+        : idType === 'olid'
+          ? identifier.toUpperCase()
+          : identifier;
     return `${COVERS_URL}/${prefix}/${idType}/${clean}-${size}.jpg`;
   }
 }

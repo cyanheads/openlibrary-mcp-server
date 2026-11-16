@@ -14,7 +14,7 @@ export const openlibraryWorkResource = resource('openlibrary://works/{work_id}',
     'Work detail by Open Library Work ID (OL…W). Provides title, description, subjects, cover IDs, and author IDs as injectable context for a conversation about a specific book.',
   mimeType: 'application/json',
   params: z.object({
-    work_id: z.string().describe('Open Library Work ID (e.g., OL45804W).'),
+    work_id: z.string().describe('Open Library Work ID (e.g., OL45804W), in any case.'),
   }),
   output: z.object({
     work_id: z

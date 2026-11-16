@@ -9,7 +9,16 @@ import { getServerConfig } from '@/config/server-config.js';
 
 let clampCounter: ReturnType<typeof createCounter> | undefined;
 
-/** Build the advertised page size with the operator's startup policy. */
+/** Largest page the editions, author-works, subject, and search endpoints serve in one request. */
+export const PAGE_CEILING = 1000;
+
+/** `/search/inside.json` answers HTTP 422 above 100 rows per page. */
+export const INSIDE_PAGE_CEILING = 100;
+
+/**
+ * Build the advertised page size with the operator's startup policy. With clamping off, every
+ * tool keeps the original `maximum: 100` schema the switch exists to restore.
+ */
 export function paginationLimit(defaultLimit: number) {
   const schema = z.number().int().min(1);
   return (getServerConfig().clampLimits ? schema : schema.max(100)).default(defaultLimit);
@@ -30,26 +39,46 @@ export function recordLimitClamp(
   clampCounter.add(1, { tool });
 }
 
-/** Apply the page ceiling once before making an upstream request. */
+/** Apply the tool's page ceiling once before making an upstream request. */
 export function applyPaginationLimit(
   requested: number,
+  ceiling: number,
   tool: string,
   ctx: Pick<Context, 'log'>,
 ): number {
-  const applied = Math.min(requested, 100);
+  const applied = Math.min(requested, ceiling);
   if (applied !== requested) recordLimitClamp(tool, ctx, { requested, applied });
   return applied;
 }
 
-/** Describe a shortened page and resume after the rows actually returned. */
+/**
+ * Describe a shortened page and resume after the rows actually returned. `end` is the first offset
+ * that returns nothing — the match count, or the last row the endpoint serves — so a page that
+ * reaches it, or lies past it, names no next offset.
+ */
 export function paginationLimitNotice(
   requested: number,
+  applied: number,
   offset: number,
   returned: number,
+  end: number,
 ): string | undefined {
-  return requested > 100
-    ? `Requested limit ${requested}; applied limit 100. Next offset: ${offset + returned}.`
-    : undefined;
+  if (applied >= requested) return;
+  const next = offset + returned;
+  return `Requested limit ${requested}; applied limit ${applied}.${next < end ? ` Next offset: ${next}.` : ''}`;
+}
+
+/**
+ * Disclose a page requested at or past the last row. `matched` is the clause naming what matched
+ * ("161 editions belong to OL45804W"); `tail` closes the retry advice when one applies.
+ */
+export function pastEndNotice(
+  offset: number,
+  total: number,
+  matched: string,
+  tail?: string,
+): string {
+  return `Offset ${offset} is past the end of the result set — ${matched}, so the last offset that returns a result is ${total - 1}. Retry with a lower offset${tail ? `; ${tail}` : ''}.`;
 }
 
 /** Compose enrichment once so a correction never replaces existing guidance. */

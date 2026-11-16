@@ -4,14 +4,18 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   applyPaginationLimit,
   composeNotices,
+  PAGE_CEILING,
   paginationLimit,
   paginationLimitNotice,
+  pastEndNotice,
 } from '@/mcp-server/tools/limit-policy.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { isBlank } from '@/services/open-library/search-criteria.js';
 
 export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
   title: 'Search Authors',
@@ -21,7 +25,7 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
   input: z.object({
     query: z.string().describe('Author name search query. Partial names and alternate names work.'),
     limit: paginationLimit(10).describe(
-      'Max results to return; values above 100 apply 100 when limit clamping is enabled.',
+      `Max results to return; values above ${PAGE_CEILING} apply ${PAGE_CEILING} when limit clamping is enabled.`,
     ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
@@ -67,6 +71,15 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
       .describe('Matching authors, up to limit.'),
   }),
 
+  errors: [
+    {
+      reason: 'no_search_criteria',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The query is empty or whitespace-only, so there is no name to search for.',
+      recovery: 'Supply a non-blank query naming the author to find, such as tolkien or "Le Guin".',
+    },
+  ],
+
   /** Agent-facing context: total count disclosure and empty-result notice. */
   enrichment: {
     totalCount: z
@@ -84,22 +97,43 @@ export const openlibrarySearchAuthors = tool('openlibrary_search_authors', {
   },
 
   async handler(input, ctx) {
+    if (isBlank(input.query)) {
+      throw ctx.fail('no_search_criteria', 'The author search query is empty or whitespace-only.');
+    }
     ctx.log.info('Searching authors', { query: input.query, limit: input.limit });
     const svc = getOpenLibraryService();
-    const limit = applyPaginationLimit(input.limit, 'openlibrary_search_authors', ctx);
+    const limit = applyPaginationLimit(
+      input.limit,
+      PAGE_CEILING,
+      'openlibrary_search_authors',
+      ctx,
+    );
     const result = await svc.searchAuthors(input.query, limit, input.offset, ctx);
-    const limitNotice = paginationLimitNotice(input.limit, input.offset, result.authors.length);
+    const limitNotice = paginationLimitNotice(
+      input.limit,
+      limit,
+      input.offset,
+      result.authors.length,
+      result.total,
+    );
 
     // Always the upstream match count, including on an empty page: an over-paged
     // request matched authors, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
+    // A notice is authored Markdown, so the caller's query is escaped inside it.
+    const query = escapeMarkdownInline(input.query);
     const emptyNotice =
       result.authors.length > 0
         ? undefined
         : result.total > 0
-          ? `Offset ${input.offset} is past the end of the result set — ${result.total} authors matched "${input.query}", so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the query itself matched.`
-          : `No authors matched "${input.query}". Try a partial name, check spelling, or use an alternate name form.`;
+          ? pastEndNotice(
+              input.offset,
+              result.total,
+              `${result.total} authors matched "${query}"`,
+              'the query itself matched',
+            )
+          : `No authors matched "${query}". Try a partial name, check spelling, or use an alternate name form.`;
     const notice = composeNotices(limitNotice, emptyNotice);
     if (notice) ctx.enrich.notice(notice);
 

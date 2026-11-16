@@ -32,12 +32,12 @@ describe('openlibraryGetAuthorWorks', () => {
       .mockResolvedValueOnce({ total: 200, author_id: 'OL19981A', works: [MOCK_WORK] });
     const result = await runToolContract(openlibraryGetAuthorWorks, {
       author_id: 'OL2162284A',
-      limit: 101,
+      limit: 1001,
       offset: 40,
     });
     expect(result.isError).toBeFalsy();
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]?.slice(0, 3)).toEqual(['OL2162284A', 100, 40]);
+    expect(spy.mock.calls[0]?.slice(0, 3)).toEqual(['OL2162284A', 1000, 40]);
     expect(result.structuredContent).toMatchObject({
       total: 200,
       author_id: 'OL19981A',
@@ -45,11 +45,33 @@ describe('openlibraryGetAuthorWorks', () => {
       works: [MOCK_WORK],
     });
     const notice = (result.structuredContent as { notice: string }).notice;
-    expect(notice).toContain('Requested limit 101; applied limit 100. Next offset: 41.');
+    // One work against a 1000-row limit is the last page, whatever total Open Library reports.
+    expect(notice).toContain('Requested limit 1001; applied limit 1000.');
+    expect(notice).not.toContain('Next offset');
     expect(notice).toContain('OL2162284A is a merged record');
     expect(
       result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'),
     ).toContain(notice);
+  });
+  it('names the next offset after a full clamped page', async () => {
+    initOpenLibraryService();
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const works = Array.from({ length: 1000 }, (_, i) => ({ ...MOCK_WORK, work_id: `OL${i}W` }));
+    vi.spyOn(svc, 'getAuthorWorks').mockResolvedValueOnce({
+      total: 2500,
+      author_id: 'OL19981A',
+      works,
+    });
+    const result = await runToolContract(openlibraryGetAuthorWorks, {
+      author_id: 'OL19981A',
+      limit: 1001,
+      offset: 40,
+    });
+    expect((result.structuredContent as { notice: string }).notice).toBe(
+      'Requested limit 1001; applied limit 1000. Next offset: 1040.',
+    );
   });
   it('renders a present empty publication date and literal title', () => {
     const result = {
@@ -193,5 +215,14 @@ describe('openlibraryGetAuthorWorks', () => {
     expect(text).toContain('OL1W');
     expect(text).toContain('Sparse Work');
     expect(text).toContain('**Cover IDs:** []');
+  });
+
+  it('routes ranked works to author_key search and names the 1000 ceiling', () => {
+    expect(openlibraryGetAuthorWorks.description).toContain(
+      'openlibrary_search_books with query "author_key:<author_id>" and sort "editions"',
+    );
+    expect(openlibraryGetAuthorWorks.input.shape.limit.description).toContain(
+      'values above 1000 apply 1000',
+    );
   });
 });

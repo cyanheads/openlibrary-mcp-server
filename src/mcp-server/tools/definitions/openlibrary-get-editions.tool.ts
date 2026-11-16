@@ -10,8 +10,10 @@ import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import {
   applyPaginationLimit,
   composeNotices,
+  PAGE_CEILING,
   paginationLimit,
   paginationLimitNotice,
+  pastEndNotice,
 } from '@/mcp-server/tools/limit-policy.js';
 import { WORK_ID_MESSAGE, WORK_ID_PATTERN } from '@/mcp-server/tools/work-id.js';
 import {
@@ -22,7 +24,7 @@ import {
 export const openlibraryGetEditions = tool('openlibrary_get_editions', {
   title: 'Get Editions',
   description:
-    'List editions of a work — different publishers, languages, formats, and print runs. Returns ISBNs, publisher, language, page count, and edition OLIDs. Use after openlibrary_get_work or openlibrary_search_books to find a specific printing. A merged work ID resolves to the work it was merged into. To reach a work from an ISBN, call openlibrary_get_edition with id_type "isbn" — its work_id output is the parent work.',
+    'List editions of a work — different publishers, languages, formats, translations, and print runs. Returns ISBNs, publisher, language, page count, edition OLIDs, and edition-level credits: subtitle, by-statement, translators and other contributors, and the language translated from. Use after openlibrary_get_work or openlibrary_search_books to find a specific printing. A merged work ID resolves to the work it was merged into. To reach a work from an ISBN, call openlibrary_get_edition with id_type "isbn" — its work_id output is the parent work.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     work_id: z
@@ -32,7 +34,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
         'Open Library Work ID. Format: OL…W (e.g., "OL45804W"), optionally prefixed "/works/". Not an ISBN — resolve an ISBN to its work with openlibrary_get_edition (id_type "isbn").',
       ),
     limit: paginationLimit(10).describe(
-      'Max editions to return; values above 100 apply 100 when limit clamping is enabled. Prefer 10–20 for exploration.',
+      `Max editions to return; values above ${PAGE_CEILING} apply ${PAGE_CEILING} when limit clamping is enabled. Prefer 10–20 for exploration.`,
     ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
@@ -60,6 +62,46 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
             title: z
               .string()
               .describe('Edition title (may differ from work title for translated editions).'),
+            subtitle: z
+              .string()
+              .optional()
+              .describe('Edition subtitle, preserved verbatim. Absent when not recorded.'),
+            by_statement: z
+              .string()
+              .optional()
+              .describe(
+                'Statement of responsibility as cataloged for this edition (e.g., "Translated by A.C. Townsend"), preserved verbatim. Absent when not recorded.',
+              ),
+            contributors: z
+              .array(
+                z
+                  .object({
+                    name: z.string().describe('Contributor name as recorded.'),
+                    role: z
+                      .string()
+                      .optional()
+                      .describe(
+                        'Contribution as recorded (e.g., "Translator", "Editor", "Illustrator"). Absent when the record names none.',
+                      ),
+                  })
+                  .describe('A contributor credited on this edition.'),
+              )
+              .optional()
+              .describe(
+                'Translators, editors, illustrators, and other contributors credited on this edition. Absent when none are recorded; contributions can name people this list omits.',
+              ),
+            contributions: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Legacy free-text credit strings as cataloged (e.g., "Garnett, Constance, 1861-1946, translator"), unparsed and independent of contributors. Absent when none are recorded.',
+              ),
+            translated_from: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Codes of the languages this edition was translated from, in the form languages uses (e.g., "rus"). Absent when not recorded.',
+              ),
             publish_date: z
               .string()
               .optional()
@@ -81,7 +123,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
               ),
             languages: z
               .array(z.string())
-              .describe('3-letter ISO language codes (e.g., "eng", "fre").'),
+              .describe('3-letter MARC language codes (e.g., "eng", "fre").'),
             isbn_10: z.array(z.string()).describe('ISBN-10 identifiers.'),
             isbn_13: z.array(z.string()).describe('ISBN-13 identifiers.'),
             page_count: z.number().optional().describe('Page count. Absent when not recorded.'),
@@ -102,7 +144,9 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance for a merged work ID or a requested limit above the page ceiling.'),
+      .describe(
+        'Guidance for a merged work ID, a requested limit above the page ceiling, or an offset past the last edition.',
+      ),
   },
   errors: [
     {
@@ -121,7 +165,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       offset: input.offset,
     });
     const svc = getOpenLibraryService();
-    const limit = applyPaginationLimit(input.limit, 'openlibrary_get_editions', ctx);
+    const limit = applyPaginationLimit(input.limit, PAGE_CEILING, 'openlibrary_get_editions', ctx);
     const result = await svc.getEditions(input.work_id, limit, input.offset, ctx);
     if (!result) {
       throw ctx.fail('not_found', `Work ${input.work_id} not found on Open Library.`);
@@ -134,7 +178,15 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       result.work_id !== requested
         ? `${escapeMarkdownInline(requested)} is a merged record; these are the editions of ${escapeMarkdownInline(result.work_id)}. Use ${escapeMarkdownInline(result.work_id)} for further lookups.`
         : undefined,
-      paginationLimitNotice(input.limit, input.offset, result.editions.length),
+      paginationLimitNotice(input.limit, limit, input.offset, result.editions.length, result.total),
+      // The editions subresource reports an exact size, so `offset >= total` is past the last row.
+      result.total > 0 && input.offset >= result.total
+        ? pastEndNotice(
+            input.offset,
+            result.total,
+            `${result.total} ${result.total === 1 ? 'edition belongs' : 'editions belong'} to ${escapeMarkdownInline(result.work_id)}`,
+          )
+        : undefined,
     );
     if (notice) ctx.enrich.notice(notice);
     // Open Library neither clamps nor reports the offset, so the requested one is the applied one.
@@ -144,6 +196,8 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
   format: (result) => {
     const literal = (value: string) => (value === '' ? '""' : escapeMarkdownInline(value));
     const list = (values: string[]) => (values.length ? values.map(literal).join(', ') : '[]');
+    const contributor = (c: { name: string; role?: string | undefined }) =>
+      c.role !== undefined ? `${literal(c.name)} (${literal(c.role)})` : literal(c.name);
     const lines: string[] = [];
     lines.push(
       `**Work ID:** ${escapeMarkdownInline(result.work_id)} | **Total editions:** ${result.total} | **Offset:** ${result.offset} | **Returned:** ${result.editions.length}`,
@@ -158,6 +212,14 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
         if (ed.title === '') lines.push('**Title:** ""');
       }
       lines.push(`**Edition ID:** ${escapeMarkdownInline(ed.edition_id)}`);
+      if (ed.subtitle !== undefined) lines.push(`**Subtitle:** ${literal(ed.subtitle)}`);
+      if (ed.by_statement !== undefined)
+        lines.push(`**By statement:** ${literal(ed.by_statement)}`);
+      // Credits can carry commas of their own ("Garnett, Constance, 1861-1946"), so entries join on "; ".
+      if (ed.contributors)
+        lines.push(`**Contributors:** ${ed.contributors.map(contributor).join('; ')}`);
+      if (ed.contributions)
+        lines.push(`**Contributions:** ${ed.contributions.map(literal).join('; ')}`);
       const meta: string[] = [];
       if (ed.publish_date !== undefined) meta.push(`Published: ${literal(ed.publish_date)}`);
       if (ed.publishers.length) meta.push(`Publisher: ${list(ed.publishers)}`);
@@ -166,6 +228,7 @@ export const openlibraryGetEditions = tool('openlibrary_get_editions', {
       else lines.push('**Language:** []');
       if (ed.page_count != null) meta.push(`Pages: ${ed.page_count}`);
       if (meta.length) lines.push(meta.join(' | '));
+      if (ed.translated_from) lines.push(`**Translated from:** ${list(ed.translated_from)}`);
       if (ed.physical_format !== undefined)
         lines.push(`**Physical format:** ${literal(ed.physical_format)}`);
       if (ed.edition_name !== undefined)

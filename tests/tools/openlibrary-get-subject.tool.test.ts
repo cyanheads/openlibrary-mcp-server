@@ -113,41 +113,96 @@ describe('openlibraryGetSubject', () => {
     ).getOpenLibraryService();
     const spy = vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(SUBJECT_RESULT);
     const result = await openlibraryGetSubject.handler(
-      openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 200, offset: 9 }),
+      openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 1200, offset: 9 }),
       ctx,
     );
     expect(result).toMatchObject({ work_count: 5432, offset: 9 });
-    expect(spy).toHaveBeenCalledWith('fiction', 100, 9, ctx);
+    expect(spy).toHaveBeenCalledWith('fiction', 1000, 9, ctx);
     expect(getEnrichment(ctx).notice).toBe(
-      'Requested limit 200; applied limit 100. Next offset: 11.',
+      'Requested limit 1200; applied limit 1000. Next offset: 11.',
     );
     expect(log).toHaveBeenCalledOnce();
   });
-  it('clamps an unknown-subject page while composing recovery on both surfaces', async () => {
+  it('requests a full 1000-row page with no clamp notice', async () => {
+    const ctx = createMockContext({ errors: openlibraryGetSubject.errors });
+    const log = vi.spyOn(ctx.log, 'notice');
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    const spy = vi.spyOn(svc, 'getSubject').mockResolvedValueOnce(SUBJECT_RESULT);
+    await openlibraryGetSubject.handler(
+      openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 1000 }),
+      ctx,
+    );
+    expect(spy).toHaveBeenCalledWith('fiction', 1000, 0, ctx);
+    expect(getEnrichment(ctx)).not.toHaveProperty('notice');
+    expect(log).not.toHaveBeenCalled();
+  });
+  it('clamps an unknown-subject page while composing recovery and subject type on both surfaces', async () => {
     initOpenLibraryService();
     const svc = (
       await import('@/services/open-library/open-library-service.js')
     ).getOpenLibraryService();
     const spy = vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
-      subject_name: 'missing',
-      subject_key: 'missing',
+      subject_name: 'org:united_nations',
+      subject_key: 'org:united_nations',
+      subject_type: 'subject',
       work_count: 0,
       works: [],
     });
     const result = await runToolContract(openlibraryGetSubject, {
-      subject: 'missing',
-      limit: 101,
+      subject: 'org:united nations',
+      limit: 1001,
       offset: 24,
     });
     expect(result.isError).toBeFalsy();
     expect(spy).toHaveBeenCalledOnce();
-    expect(spy).toHaveBeenCalledWith('missing', 100, 24, expect.anything());
+    expect(spy).toHaveBeenCalledWith('org:united nations', 1000, 24, expect.anything());
     expect(result.structuredContent).toMatchObject({
+      subject_type: 'subject',
       work_count: 0,
       offset: 24,
       notice: expect.stringContaining('synonym'),
     });
-    expect(JSON.stringify(result.content)).toContain('Next offset: 24');
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('Requested limit 1001; applied limit 1000.');
+    // An empty subject has no next page to name.
+    expect(notice).not.toContain('Next offset');
+    expect(notice).not.toContain('past the end');
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('**Subject type:** subject');
+    expect(text).toContain('Requested limit 1001; applied limit 1000.');
+  });
+  it('renders the subject type on a populated page on both surfaces', async () => {
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'getSubject').mockResolvedValueOnce({
+      ...SUBJECT_RESULT,
+      subject_name: 'London (England)',
+      subject_key: 'place:london_(england)',
+      subject_type: 'place',
+    });
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'place:London (England)',
+    });
+    expect(result.structuredContent).toMatchObject({ subject_type: 'place', work_count: 5432 });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('**Subject type:** place');
+  });
+  it('omits the subject type line when Open Library sends none', () => {
+    const text = (
+      openlibraryGetSubject.format!({ ...SUBJECT_RESULT, offset: 0 })[0] as {
+        text: string;
+      }
+    ).text;
+    expect(text).not.toContain('Subject type');
   });
   beforeEach(() => {
     initOpenLibraryService();
@@ -274,5 +329,25 @@ describe('openlibraryGetSubject', () => {
     // format() shows header and zero counts; notice is in enrichment trailer
     expect(text).toContain('xzqnonexistent');
     expect(text).toContain('Total works:** 0');
+  });
+
+  it('documents the browse prefixes, their work fields, and the 1000 ceiling', () => {
+    const { description } = openlibraryGetSubject;
+    for (const term of [
+      'place:',
+      'person:',
+      'time:',
+      'subject_places',
+      'subject_people',
+      'subject_times',
+      'openlibrary_get_work',
+    ])
+      expect(description).toContain(term);
+    expect(openlibraryGetSubject.input.shape.subject.description).toContain(
+      '"place: London" → "place:london"',
+    );
+    expect(openlibraryGetSubject.input.shape.limit.description).toContain(
+      'values above 1000 apply 1000',
+    );
   });
 });

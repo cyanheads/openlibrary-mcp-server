@@ -6,6 +6,7 @@
  * @module tests/tools/strict-inputs.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import { openlibraryGetAuthor } from '@/mcp-server/tools/definitions/openlibrary-get-author.tool.js';
 import { openlibraryGetAuthorWorks } from '@/mcp-server/tools/definitions/openlibrary-get-author-works.tool.js';
@@ -46,4 +47,39 @@ describe('tool inputs are closed', () => {
       expect(JSON.stringify(issue)).toContain('not_a_real_parameter');
     });
   }
+});
+
+describe('search tools reject blank criteria in the handler, not the schema', () => {
+  const SEARCH_TOOLS = [openlibrarySearchBooks, openlibrarySearchAuthors, openlibrarySearchInside];
+
+  it.each(
+    (
+      [
+        [openlibrarySearchBooks, {}],
+        [openlibrarySearchBooks, { query: '   ', title: '' }],
+        [openlibrarySearchBooks, { language: 'ger', sort: 'new' }],
+        [openlibrarySearchAuthors, { query: '' }],
+        [openlibrarySearchAuthors, { query: '   ' }],
+        [openlibrarySearchInside, { query: ' ' }],
+      ] as const
+    ).map(([tool, input]) => [tool.name, tool, input] as const),
+  )('%s keeps accepting %j at the schema', (_name, tool, input) => {
+    expect(tool.input.safeParse(input).success).toBe(true);
+  });
+
+  it('keeps the empty search-inside query a schema failure', () => {
+    expect(openlibrarySearchInside.input.safeParse({ query: '' }).success).toBe(false);
+  });
+
+  it('declares one no_search_criteria contract on all three search tools', () => {
+    for (const tool of SEARCH_TOOLS) {
+      expect(tool.errors).toContainEqual(
+        expect.objectContaining({
+          reason: 'no_search_criteria',
+          code: JsonRpcErrorCode.ValidationError,
+          recovery: expect.stringMatching(/^Supply a non-blank query/),
+        }),
+      );
+    }
+  });
 });

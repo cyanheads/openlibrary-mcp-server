@@ -21,7 +21,7 @@ export const openlibraryGetCoverUrl = tool('openlibrary_get_cover_url', {
     identifier: z
       .string()
       .describe(
-        'The identifier value, validated against id_type before the URL is built. For "id": a numeric cover or photo ID from work/edition/author data. For "isbn": 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For "olid": an edition OLID (OL…M) for target "book", an author OLID (OL…A) for target "author".',
+        'The identifier value, validated against id_type before the URL is built. For "id": a numeric cover or photo ID from work/edition/author data. For "isbn": 10 or 13 digits, hyphens optional — an ISBN-10 may end in an X check digit (e.g., 080442957X). For "olid": an edition OLID (OL…M) for target "book", an author OLID (OL…A) for target "author", in any case — the URL carries it upper-cased.',
       ),
     id_type: z
       .enum(['id', 'isbn', 'olid'])

@@ -186,6 +186,68 @@ describe('openlibrarySearchBooks', () => {
       .description as string;
     expect(description).toContain('no availability');
     expect(description).not.toContain('no IA item exists');
+    expect(description).toContain('the notice names them as unknown');
+  });
+
+  // ─── Availability lookup (#55) ──────────────────────────────────────────────
+
+  it('states the availability cost as lookup requests, not a fixed latency', () => {
+    const description = openlibrarySearchBooks.input.shape.include_availability.description;
+    expect(description).toContain(
+      'one additional search request per 100 returned works with an Internet Archive scan',
+    );
+    expect(description).not.toContain('200ms');
+  });
+
+  it('names the works whose availability is unknown in the notice', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 2,
+      offset: 0,
+      works: [
+        makeWork({ work_id: 'OL1W', availability: null }),
+        makeWork({ work_id: 'OL2W', availability: null, ia_identifiers: [] }),
+      ],
+      availabilityUnknown: ['OL1W'],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({
+      query: 'whales',
+      include_availability: true,
+    });
+    await openlibrarySearchBooks.handler(input, ctx);
+
+    const { notice } = getEnrichment(ctx);
+    expect(notice).toContain('Availability is unknown for work OL1W:');
+    expect(notice).toContain('missing availability there does not mean none exists');
+    expect(notice).not.toContain('OL2W');
+  });
+
+  it('keeps the limit notice beside the unknown-availability notice', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchBooks.errors });
+    const svc = (
+      await import('@/services/open-library/open-library-service.js')
+    ).getOpenLibraryService();
+    vi.spyOn(svc, 'searchBooks').mockResolvedValueOnce({
+      total: 5000,
+      offset: 0,
+      works: [makeWork({ work_id: 'OL1W' }), makeWork({ work_id: 'OL3W' })],
+      availabilityUnknown: ['OL1W', 'OL3W'],
+    });
+
+    const input = openlibrarySearchBooks.input.parse({
+      query: 'history',
+      limit: 1500,
+      include_availability: true,
+    });
+    await openlibrarySearchBooks.handler(input, ctx);
+
+    const { notice } = getEnrichment(ctx);
+    expect(notice).toContain('Requested limit 1500; applied limit 1000.');
+    expect(notice).toContain('Availability is unknown for 2 works OL1W, OL3W:');
   });
 
   it('handles sparse work (no optional fields)', () => {

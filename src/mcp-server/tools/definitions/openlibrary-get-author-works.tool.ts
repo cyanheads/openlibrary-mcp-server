@@ -9,6 +9,7 @@ import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   applyPaginationLimit,
   composeNotices,
+  PAGE_CEILING,
   paginationLimit,
   paginationLimitNotice,
 } from '@/mcp-server/tools/limit-policy.js';
@@ -20,21 +21,25 @@ import {
 export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   title: 'Get Author Works',
   description:
-    'List works by an author. Returns titles, cover IDs, and work OLIDs for drilling into editions or details. Use openlibrary_get_author for author bio and details, or openlibrary_get_editions to explore specific printings.',
+    'List works by an author. Returns titles, cover IDs, and work OLIDs for drilling into editions or details. For the author\'s works ranked by edition count, call openlibrary_search_books with query "author_key:<author_id>" and sort "editions". Use openlibrary_get_author for author bio and details, or openlibrary_get_editions to explore specific printings.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     author_id: z
       .string()
       .describe(
-        'Open Library Author ID (OL…A). A leading "/authors/" prefix is stripped if provided.',
+        'Open Library Author ID (OL…A, e.g., "OL24638A"), in any case. A leading "/authors/" prefix is stripped if provided.',
       ),
     limit: paginationLimit(20).describe(
-      'Max works to return; values above 100 apply 100 when limit clamping is enabled.',
+      `Max works to return; values above ${PAGE_CEILING} apply ${PAGE_CEILING} when limit clamping is enabled.`,
     ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
   }),
   output: z.object({
-    total: z.number().describe('Total works by this author.'),
+    total: z
+      .number()
+      .describe(
+        'Total works Open Library reports for this author; the count can exceed the works it serves.',
+      ),
     offset: z
       .number()
       .describe(
@@ -64,11 +69,18 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
       .describe('Works by this author, up to limit.'),
   }),
   enrichment: {
-    totalCount: z.number().optional().describe('Total works by this author across all pages.'),
+    totalCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total works Open Library reports for this author across all pages; the count can exceed the works it serves.',
+      ),
     notice: z
       .string()
       .optional()
-      .describe('Guidance for a merged author ID or a requested limit above the page ceiling.'),
+      .describe(
+        'Guidance for an empty page past the last served work, a requested limit above the page ceiling, or a merged author ID.',
+      ),
   },
   errors: [
     {
@@ -83,7 +95,12 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
   async handler(input, ctx) {
     ctx.log.info('Fetching author works', { author_id: input.author_id, limit: input.limit });
     const svc = getOpenLibraryService();
-    const limit = applyPaginationLimit(input.limit, 'openlibrary_get_author_works', ctx);
+    const limit = applyPaginationLimit(
+      input.limit,
+      PAGE_CEILING,
+      'openlibrary_get_author_works',
+      ctx,
+    );
     const result = await svc.getAuthorWorks(input.author_id, limit, input.offset, ctx);
     if (!result) {
       throw ctx.fail('not_found', `Author ${input.author_id} not found on Open Library.`);
@@ -96,7 +113,20 @@ export const openlibraryGetAuthorWorks = tool('openlibrary_get_author_works', {
     // unconditional call would render an empty notice on every ordinary lookup.
     const requested = normalizeAuthorId(input.author_id);
     const notice = composeNotices(
-      paginationLimitNotice(input.limit, input.offset, result.works.length),
+      // Open Library can report a `size` above the rows it serves (OL31353A: 271
+      // reported, 270 served), so no exact last offset is claimed, and an empty
+      // page below the reported total is disclosed the same way.
+      result.total > 0 && result.works.length === 0
+        ? `Offset ${input.offset} is past the end of the result set — ${result.total} works are listed for ${escapeMarkdownInline(result.author_id)}, though Open Library's count can include works it no longer serves, so the list can end before ${result.total}. Retry with a lower offset.`
+        : undefined,
+      // The reported total can run past the rows served, so a short page is the last one.
+      paginationLimitNotice(
+        input.limit,
+        limit,
+        input.offset,
+        result.works.length,
+        result.works.length < limit ? input.offset + result.works.length : result.total,
+      ),
       result.author_id !== requested
         ? `${requested} is a merged record; these are the works of ${result.author_id}. Use ${result.author_id} for further lookups.`
         : undefined,

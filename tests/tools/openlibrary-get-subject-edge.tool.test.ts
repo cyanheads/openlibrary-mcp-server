@@ -8,6 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibraryGetSubject } from '@/mcp-server/tools/definitions/openlibrary-get-subject.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
 
+function contentText(result: { content: unknown[] }): string {
+  return result.content
+    .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
+    .join('\n');
+}
+
 describe('openlibraryGetSubject — edge cases and security', () => {
   beforeEach(() => {
     initOpenLibraryService();
@@ -48,8 +54,8 @@ describe('openlibraryGetSubject — edge cases and security', () => {
     expect(() => openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 0 })).toThrow();
   });
 
-  it('accepts limit above 100 for clamping', () => {
-    expect(openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 101 }).limit).toBe(101);
+  it('accepts limit above the page ceiling for clamping', () => {
+    expect(openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 1001 }).limit).toBe(1001);
   });
 
   it('rejects negative offset', () => {
@@ -63,9 +69,9 @@ describe('openlibraryGetSubject — edge cases and security', () => {
     expect(input.limit).toBe(1);
   });
 
-  it('accepts limit 100 (maximum)', () => {
-    const input = openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 100 });
-    expect(input.limit).toBe(100);
+  it('accepts limit 1000 (page ceiling)', () => {
+    const input = openlibraryGetSubject.input.parse({ subject: 'fiction', limit: 1000 });
+    expect(input.limit).toBe(1000);
   });
 
   // ─── Unknown subject ─────────────────────────────────────────────────────────
@@ -246,12 +252,6 @@ describe('openlibraryGetSubject — offset echo', () => {
     );
   }
 
-  function contentText(result: { content: unknown[] }): string {
-    return result.content
-      .map((block) => (block && typeof block === 'object' && 'text' in block ? block.text : ''))
-      .join('\n');
-  }
-
   beforeEach(() => {
     initOpenLibraryService();
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
@@ -298,5 +298,86 @@ describe('openlibraryGetSubject — offset echo', () => {
     expect(structured.work_count).toBe(0);
     expect(contentText(result)).toContain('**Total works:** 0 | **Offset:** 24 | **Returned:** 0');
     expect((result.structuredContent as { notice?: string }).notice).toContain('zzznotasubject');
+  });
+});
+
+describe('openlibraryGetSubject — past-end pages', () => {
+  /** A `subjects/{key}.json` page carrying `count` of `workCount` works. */
+  function subjectPage(name: string, workCount: number, count: number): Response {
+    return new Response(
+      JSON.stringify({
+        name,
+        subject_type: 'subject',
+        work_count: workCount,
+        works: Array.from({ length: count }, (_, i) => ({
+          key: `/works/OL${i + 1}W`,
+          title: `Work ${i + 1}`,
+          authors: [{ name: 'Someone' }],
+          edition_count: 1,
+        })),
+      }),
+      { status: 200 },
+    );
+  }
+
+  beforeEach(() => {
+    initOpenLibraryService();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['at the total', 21276],
+    ['far past the total', 5_000_000],
+  ])('discloses an offset %s on both surfaces', async (_label, offset) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(subjectPage('Science fiction', 21276, 0));
+
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'science fiction',
+      offset,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const notice = `Offset ${offset} is past the end of the result set — 21276 works carry the subject "Science fiction", so the last offset that returns a result is 21275. Retry with a lower offset.`;
+    expect(result.structuredContent).toMatchObject({
+      work_count: 21276,
+      offset,
+      works: [],
+      subject_type: 'subject',
+      notice,
+    });
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('adds no notice to the page holding the last work', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(subjectPage('Science fiction', 21276, 1));
+
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'science fiction',
+      offset: 21275,
+    });
+
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('past the end');
+  });
+
+  it('escapes the subject name and composes the clamp after the past-end notice', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(subjectPage('*Sci* fi', 40, 0));
+
+    const result = await runToolContract(openlibraryGetSubject, {
+      subject: 'sci fi',
+      limit: 1001,
+      offset: 40,
+    });
+
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'Offset 40 is past the end of the result set — 40 works carry the subject "\\*Sci\\* fi", so the last offset that returns a result is 39. Retry with a lower offset. Requested limit 1001; applied limit 1000.',
+    );
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('limit=1000&offset=40');
   });
 });

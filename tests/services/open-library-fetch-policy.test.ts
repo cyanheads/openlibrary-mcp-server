@@ -123,7 +123,7 @@ describe('book search validation classification', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['ab', '頭痛', ' '])(
+  it.each(['ab', '頭痛'])(
     'classifies actual 422 for query %j without mutation or retry',
     async (query) => {
       serve(() =>
@@ -417,6 +417,25 @@ describe('OpenLibraryService — which failures end a ladder early', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('classifies a 2xx body that is not JSON as ServiceUnavailable, retried within the deadline', async () => {
+    vi.useFakeTimers();
+    serve(() => Promise.resolve(new Response('Internal Server Error', { status: 200 })));
+
+    const call = track(() =>
+      getOpenLibraryService().searchBooks(
+        { query: 'dune', limit: 10, offset: 0 },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    // An upstream fault, never the caller's ValidationError a raw SyntaxError classifies as.
+    expect(call.state.error).toBeInstanceOf(McpError);
+    expect(call.state.error).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(fetchSpy.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it('retries a 429 after the Retry-After the upstream named', async () => {
     vi.useFakeTimers();
     let calls = 0;
@@ -565,6 +584,24 @@ describe('getEditionsByIdentifiers — the bibkeys route', () => {
       data: { reason: 'upstream_unavailable' },
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies a 2xx non-JSON body from the bibkeys route as upstream_unavailable', async () => {
+    vi.useFakeTimers();
+    serve(() => Promise.resolve(new Response('Internal Server Error', { status: 200 })));
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+
+    const call = track(() =>
+      getOpenLibraryService().getEditionsByIdentifiers(['9780140328721'], 'isbn', ctx),
+    );
+    await vi.advanceTimersByTimeAsync(RETRY_DEADLINE_MS);
+    await call.done;
+
+    expect(call.state.error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: "Open Library's edition lookup failed upstream with a body that is not JSON.",
+      data: { reason: 'upstream_unavailable' },
+    });
   });
 
   it('keeps a 429 from the bibkeys route RateLimited rather than upstream_unavailable', async () => {

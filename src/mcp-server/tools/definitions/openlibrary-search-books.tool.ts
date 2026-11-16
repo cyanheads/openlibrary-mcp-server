@@ -10,11 +10,14 @@ import { NO_TITLE } from '@/mcp-server/tools/heading-placeholders.js';
 import {
   applyPaginationLimit,
   composeNotices,
+  PAGE_CEILING,
   paginationLimit,
   paginationLimitNotice,
+  pastEndNotice,
 } from '@/mcp-server/tools/limit-policy.js';
 import { normalizeLanguageCode } from '@/services/open-library/language-codes.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { bookSearchCriteria } from '@/services/open-library/search-criteria.js';
 
 /** Text label for each availability flag, in the order `format()` renders them. */
 const AVAILABILITY_FLAG_LABELS = [
@@ -30,14 +33,14 @@ const AVAILABILITY_FLAG_LABELS = [
 export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   title: 'Search Books',
   description:
-    'Full-text book search across Open Library works. Supports field filters (title, author, subject, publisher, ISBN, language) and returns work-level records with edition counts, cover IDs, and reading availability. Use query for general search or combine specific field filters. Results are work-level — drill into editions via openlibrary_get_editions.',
+    'Full-text book search across Open Library works. Supports field filters (title, author, subject, publisher, ISBN, language) and returns work-level records with edition counts, cover IDs, and reading availability. Use query for general search or combine specific field filters; a search needs at least one of query, title, author, subject, publisher, or isbn with a non-blank value, and language and sort only narrow or order it. Results are work-level — drill into editions via openlibrary_get_editions.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     query: z
       .string()
       .optional()
       .describe(
-        'Full-text search query. Supports Solr field prefixes: title:, author:, subject:, publisher:, isbn:, language:. Omit to use the filter parameters instead.',
+        'Full-text search query. Supports Solr field prefixes: title:, author:, subject:, publisher:, isbn:, language: (MARC codes), plus ia:<ia_identifier> (the work holding an Internet Archive scan, with that scan\'s edition in matching_edition), author_key:<author_id> (one author\'s works; pair with sort "editions" to rank them), first_publish_year:[1900 TO 1950] (an era), and ebook_access:public (freely readable). Omit, or leave blank, to search by title, author, subject, publisher, or isbn instead.',
       ),
     title: z
       .string()
@@ -61,7 +64,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .regex(/^[A-Za-z]{2,3}$/)
       .optional()
       .describe(
-        'Restrict results to one language. Takes a 3-letter MARC code (e.g., "eng", "fre", "ger", "chi") — the same vocabulary openlibrary_get_edition and openlibrary_get_editions return. A 2-letter ISO 639-1 code (e.g., "en", "fr") is accepted and translated to its MARC equivalent; an unrecognized 2-letter code is rejected rather than silently ignored. The equivalent in-query form is language:eng.',
+        'Restrict results to one language. Takes a 3-letter MARC code (e.g., "eng", "fre", "ger", "chi") — the same vocabulary openlibrary_get_edition and openlibrary_get_editions return. A 2-letter ISO 639-1 code ("en", "fr") or an ISO 639-2/T code ("deu", "fra", "zho") is accepted in any case and translated to its MARC equivalent; a code that is neither a MARC code nor an Open Library language record is rejected rather than silently matching nothing. Chinese is indexed under both "chi" and "cmn" (958,147 and 76,029 works as of November 2026), so search each to cover both. The in-query form language:eng takes MARC codes only.',
       ),
     sort: z
       .enum(['relevance', 'new', 'old', 'rating', 'editions'])
@@ -70,14 +73,14 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
         'Sort order. "relevance" uses Solr scoring. "new"/"old" sort by first publish year. "rating" by average community rating. "editions" by edition count.',
       ),
     limit: paginationLimit(10).describe(
-      'Max results to return. Higher values increase response size; prefer 10–20 for exploration.',
+      `Max results to return; values above ${PAGE_CEILING} apply ${PAGE_CEILING} when limit clamping is enabled. Higher values increase response size; prefer 10–20 for exploration.`,
     ),
     offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
     include_availability: z
       .boolean()
       .default(false)
       .describe(
-        'Include live reading availability from Internet Archive (borrow/read status). Adds ~200ms latency. Use when the user needs to know if they can read the book online.',
+        'Include live reading availability from Internet Archive (borrow/read status). Costs one additional search request per 100 returned works with an Internet Archive scan. Use when the user needs to know if they can read the book online.',
       ),
   }),
   output: z.object({
@@ -202,7 +205,7 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
               .nullable()
               .optional()
               .describe(
-                'Live reading availability from Internet Archive, present when include_availability is true. Open Library leaves flags out for some works — an absent flag is unknown, not false. Null means no availability was returned for the work: always so without an Internet Archive item, and sometimes so for a work that has one.',
+                'Live reading availability from Internet Archive, present when include_availability is true. Open Library leaves flags out for some works — an absent flag is unknown, not false. Null means no availability was returned for the work: always so without an Internet Archive item, and sometimes so for a work that has one. When the availability lookup does not complete, its works are null too and the notice names them as unknown.',
               ),
             ia_identifiers: z
               .array(z.string())
@@ -214,6 +217,13 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
   }),
   errors: [
     {
+      reason: 'no_search_criteria',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Every search criterion (query, title, author, subject, publisher, isbn) is absent or blank, so there is nothing to search for.',
+      recovery:
+        'Supply a non-blank query, title, author, subject, publisher, or isbn; language and sort narrow or order a search and need one of those beside them.',
+    },
+    {
       reason: 'invalid_search_query',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Open Library rejects the search query with HTTP 422.',
@@ -224,9 +234,9 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     {
       reason: 'unknown_language_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A 2-letter language value has no MARC equivalent, so no filter could be applied.',
+      when: 'The language value names no language — an unrecognized 2-letter code, or a 3-letter code that is neither a MARC code nor an Open Library language record — so no filter could be applied.',
       recovery:
-        'Pass a 3-letter MARC language code such as "eng", "fre", "ger", or "spa" instead of the unrecognized value.',
+        'Pass a 3-letter MARC language code such as "eng", "fre", "ger", or "spa", or a 2-letter ISO 639-1 code such as "en", instead of the unrecognized value.',
       // `normalizeLanguageCode` raises this inside the service, below the handler
       // closure, so no literal `ctx.fail` here names it.
       thrownBy: 'service',
@@ -251,11 +261,18 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
       .string()
       .optional()
       .describe(
-        'Guidance when the page is empty or a requested page limit was reduced to 100. Absent when neither applies.',
+        `Guidance when the page is empty, a requested page limit was reduced to ${PAGE_CEILING}, or availability is unknown for some works. Absent when none applies.`,
       ),
   },
 
   async handler(input, ctx) {
+    const criteria = bookSearchCriteria(input);
+    if (Object.keys(criteria).length === 0) {
+      throw ctx.fail(
+        'no_search_criteria',
+        'The search has no criterion: query, title, author, subject, publisher, and isbn are all absent or blank.',
+      );
+    }
     ctx.log.info('Searching books', {
       query: input.query,
       title: input.title,
@@ -266,17 +283,11 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     });
 
     const svc = getOpenLibraryService();
-    const limit = applyPaginationLimit(input.limit, 'openlibrary_search_books', ctx);
+    const limit = applyPaginationLimit(input.limit, PAGE_CEILING, 'openlibrary_search_books', ctx);
     const result = await svc.searchBooks({ ...input, limit }, ctx);
 
-    // Build queryEcho from active filters for agent context
-    const filters: string[] = [];
-    if (input.query) filters.push(`query "${input.query}"`);
-    if (input.title) filters.push(`title "${input.title}"`);
-    if (input.author) filters.push(`author "${input.author}"`);
-    if (input.subject) filters.push(`subject "${input.subject}"`);
-    if (input.publisher) filters.push(`publisher "${input.publisher}"`);
-    if (input.isbn) filters.push(`isbn "${input.isbn}"`);
+    // Echo the criteria the request carried; a blank one never reached upstream.
+    const filters = Object.entries(criteria).map(([field, value]) => `${field} "${value}"`);
     // Echo the MARC code actually sent upstream, not the caller's input — an echo
     // asserting a filter value that was never applied is worse than no echo. The
     // service already normalized (and rejected unmappable codes) above, so this
@@ -291,19 +302,34 @@ export const openlibrarySearchBooks = tool('openlibrary_search_books', {
     // request matched works, and reporting 0 would misdirect the correction.
     ctx.enrich.total(result.total);
 
-    const clampNotice = paginationLimitNotice(input.limit, result.offset, result.works.length);
-    let notice = clampNotice;
+    const clampNotice = paginationLimitNotice(
+      input.limit,
+      limit,
+      result.offset,
+      result.works.length,
+      result.total,
+    );
+    const unknownAvailability = result.availabilityUnknown;
+    let notice = composeNotices(
+      clampNotice,
+      unknownAvailability &&
+        `Availability is unknown for ${unknownAvailability.length === 1 ? 'work' : `${unknownAvailability.length} works`} ${unknownAvailability.join(', ')}: the availability lookup did not complete, so missing availability there does not mean none exists. Retry the search to fetch it.`,
+    );
     if (result.works.length === 0) {
       if (result.total > 0) {
         notice = composeNotices(
-          `Offset ${result.offset} is past the end of the result set — ${result.total} works matched, so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the search criteria themselves matched.`,
+          pastEndNotice(
+            result.offset,
+            result.total,
+            `${result.total} works matched`,
+            'the search criteria themselves matched',
+          ),
           clampNotice,
         );
       } else {
+        // `filters` is never empty here: a search without a criterion failed above.
         notice = composeNotices(
-          filters.length
-            ? `No works matched ${escapeMarkdownInline(filters.join(', '))}. Try broader or different terms.`
-            : 'No works matched your search. Try different filters or a general query.',
+          `No works matched ${escapeMarkdownInline(filters.join(', '))}. Try broader or different terms.`,
           clampNotice,
         );
       }

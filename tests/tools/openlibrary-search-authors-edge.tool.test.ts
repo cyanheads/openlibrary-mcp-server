@@ -3,10 +3,101 @@
  * @module tests/tools/openlibrary-search-authors-edge.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openlibrarySearchAuthors } from '@/mcp-server/tools/definitions/openlibrary-search-authors.tool.js';
 import { initOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { expectLinearTime } from '../timing.js';
+
+describe('openlibrarySearchAuthors — blank query', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  const declaredRecovery = () =>
+    openlibrarySearchAuthors.errors!.find((entry) => entry.reason === 'no_search_criteria')
+      ?.recovery;
+
+  beforeEach(() => {
+    initOpenLibraryService();
+    fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({ numFound: 0, docs: [] }));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['', '   ', '\t\n'])(
+    'fails %j as no_search_criteria before any request, on both surfaces',
+    async (query) => {
+      const result = await runToolContract(openlibrarySearchAuthors, { query });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'no_search_criteria', recovery: { hint: declaredRecovery() } },
+        },
+      });
+      expect(
+        result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'),
+      ).toContain(declaredRecovery());
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails a blank query over the page ceiling without logging a clamp', async () => {
+    const ctx = createMockContext({ errors: openlibrarySearchAuthors.errors });
+    const log = vi.spyOn(ctx.log, 'notice');
+    await expect(
+      openlibrarySearchAuthors.handler(
+        openlibrarySearchAuthors.input.parse({ query: '   ', limit: 1500 }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'no_search_criteria' },
+    });
+    expect(log).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [0, 'No authors matched "john \\*smith\\*"'],
+    [4304, 'authors matched "john \\*smith\\*", so the last offset'],
+  ])('escapes the query inside the notice (total %i) on both surfaces', async (total, expected) => {
+    fetchSpy.mockResolvedValue(Response.json({ numFound: total, docs: [] }));
+    const result = await runToolContract(openlibrarySearchAuthors, {
+      query: 'john *smith*',
+      offset: 9999,
+    });
+    expect((result.structuredContent as { notice: string }).notice).toContain(expected);
+    expect(
+      result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'),
+    ).toContain(expected);
+  });
+
+  // The authors and search-inside notices both route the caller's unbounded query through this escape.
+  it.each([
+    ['a long digit run', (size: number) => '7'.repeat(size)],
+    ['one long line ending in a break', (size: number) => `${'§1 x'.repeat(size / 4)}\ny`],
+    ['breaks throughout', (size: number) => '  \r\n'.repeat(size / 4)],
+    ['repeated emphasis openers', (size: number) => '*'.repeat(size)],
+    ['repeated underscores', (size: number) => '_'.repeat(size)],
+    ['repeated backticks', (size: number) => '`'.repeat(size)],
+    ['repeated link openers', (size: number) => '['.repeat(size)],
+    ['nested angle openers', (size: number) => '<a'.repeat(size / 2)],
+    ['nested link openers', (size: number) => '[a]('.repeat(size / 4)],
+    ['overlapping entity prefixes', (size: number) => '&#x'.repeat(Math.ceil(size / 3))],
+  ])(
+    'escapes a query of %s in linear time',
+    (_shape, make) => expectLinearTime(make, escapeMarkdownInline),
+    0,
+  );
+
+  it('sends a padded query untrimmed', async () => {
+    await runToolContract(openlibrarySearchAuthors, { query: ' le guin ' });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams.get('q')).toBe(' le guin ');
+  });
+});
 
 describe('openlibrarySearchAuthors — edge cases and security', () => {
   beforeEach(() => {
@@ -19,7 +110,7 @@ describe('openlibrarySearchAuthors — edge cases and security', () => {
     expect(() => openlibrarySearchAuthors.input.parse({ query: 'tolkien', limit: 0 })).toThrow();
   });
 
-  it('accepts a limit above 100 for clamping', () => {
+  it('accepts a limit above the page ceiling for clamping', () => {
     expect(openlibrarySearchAuthors.input.parse({ query: 'tolkien', limit: 101 }).limit).toBe(101);
   });
 

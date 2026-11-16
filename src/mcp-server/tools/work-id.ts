@@ -5,10 +5,11 @@
  */
 
 /**
- * A work OLID, optionally `/works/`-prefixed. Every other shape a caller might
- * send — an ISBN, an edition or author OLID, a lowercase or padded ID, a web
- * URL or slug — fails upstream anyway (404, or a 301 to a record of another
- * type), so rejecting it here costs nothing that resolves today.
+ * A work OLID, optionally `/works/`-prefixed. An ISBN, an edition or author
+ * OLID, a padded ID, a web URL or slug all fail upstream anyway (404, or a 301
+ * to a record of another type). A lowercase OLID is rejected too, although the
+ * service would upper-case it: the pattern is advertised in `tools/list`, and
+ * widening it would change a validation outcome existing clients rely on.
  */
 export const WORK_ID_PATTERN = /^(?:\/works\/)?OL\d+W$/;
 

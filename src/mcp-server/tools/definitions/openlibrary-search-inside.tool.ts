@@ -9,15 +9,24 @@ import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   applyPaginationLimit,
   composeNotices,
+  INSIDE_PAGE_CEILING,
   paginationLimit,
   paginationLimitNotice,
+  pastEndNotice,
 } from '@/mcp-server/tools/limit-policy.js';
 import { getOpenLibraryService } from '@/services/open-library/open-library-service.js';
+import { isBlank } from '@/services/open-library/search-criteria.js';
+
+/**
+ * `/search/inside.json` serves `offset + limit` up to this many results; past it, it answers
+ * HTTP 200 with an error object in place of hits, which no retry changes.
+ */
+const RESULT_WINDOW = 10_000;
 
 export const openlibrarySearchInside = tool('openlibrary_search_inside', {
   title: 'Search Inside Books',
   description:
-    'Search the full text of books scanned by the Internet Archive — the "which book contains this passage?" lookup that the metadata tools cannot answer. Quote a phrase for an exact-phrase match; bare terms match anywhere in the text. Each result is an Internet Archive item with the matching passages as snippets, plus a relevance score. The full-text index is far slower than the metadata endpoints, and a search usually takes 10–30 seconds. Use it when the passage is the question, and use openlibrary_search_books to search by title, author, or subject. Results key on Internet Archive items rather than Open Library works: chain the returned ia_identifier to archive.org, or match it against the ia_identifiers on openlibrary_search_books results to reach the catalogue record.',
+    'Search the full text of books scanned by the Internet Archive — the "which book contains this passage?" lookup that the metadata tools cannot answer. Quote a phrase for an exact-phrase match; bare terms match anywhere in the text. Each result is an Internet Archive item with the matching passages as snippets, plus a relevance score. The full-text index is far slower than the metadata endpoints, and a search usually takes 10–30 seconds. Use it when the passage is the question, and use openlibrary_search_books to search by title, author, or subject. Results key on Internet Archive items rather than Open Library works. To reach the catalogue record, pass an ia_identifier to openlibrary_search_books as query "ia:<ia_identifier>", which returns its work and, in matching_edition, the edition holding that scan; when that matches nothing (a scan no edition records), search openlibrary_search_books by the item\'s title and creator and compare the ia_identifiers on its results. Each ia_identifier also reads at archive.org.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -27,9 +36,16 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
         'Text to find inside scanned books. Wrap in double quotes for an exact-phrase match (e.g., "the spice must flow"); unquoted terms match independently and return far broader results.',
       ),
     limit: paginationLimit(10).describe(
-      'Max matching items to return. Each carries its own snippets, so higher values grow the response quickly — prefer 10–20.',
+      `Max matching items to return; values above ${INSIDE_PAGE_CEILING} apply ${INSIDE_PAGE_CEILING} when limit clamping is enabled. Each carries its own snippets, so higher values grow the response quickly — prefer 10–20.`,
     ),
-    offset: z.number().int().min(0).default(0).describe('Zero-based offset for pagination.'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Zero-based offset for pagination, below 10000: the full-text index serves only its first 10,000 results, so a page that would run past them is shortened to end there.',
+      ),
   }),
   output: z.object({
     total: z.number().describe('Total matching Internet Archive items across all pages.'),
@@ -71,6 +87,20 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
 
   errors: [
     {
+      reason: 'no_search_criteria',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The query is whitespace-only, so there is no text to search for.',
+      recovery:
+        'Supply a non-blank query holding the passage to find, such as "the spice must flow".',
+    },
+    {
+      reason: 'offset_past_result_window',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "offset is 10000 or more, past the first 10,000 results Open Library's full-text index serves.",
+      recovery:
+        'Use an offset below 10000, or narrow or quote the query so the matches you need rank within its first 10,000 results.',
+    },
+    {
       reason: 'upstream_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: "Open Library's full-text search answered HTTP 200 without a result set — no hits object carrying a total.",
@@ -94,11 +124,20 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
       .string()
       .optional()
       .describe(
-        'Guidance for an empty page or a requested limit above the page ceiling. Absent when neither applies.',
+        'Guidance for an empty page, a requested limit above the page ceiling, or a page shortened to end at the 10,000-result window. Absent when none applies.',
       ),
   },
 
   async handler(input, ctx) {
+    if (isBlank(input.query)) {
+      throw ctx.fail('no_search_criteria', 'The full-text search query is whitespace-only.');
+    }
+    if (input.offset >= RESULT_WINDOW) {
+      throw ctx.fail(
+        'offset_past_result_window',
+        `Offset ${input.offset} is past the first 10,000 results Open Library's full-text index serves; the last offset it answers is 9999.`,
+      );
+    }
     ctx.log.info('Searching inside books', {
       query: input.query,
       limit: input.limit,
@@ -106,9 +145,26 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
     });
 
     const svc = getOpenLibraryService();
-    const limit = applyPaginationLimit(input.limit, 'openlibrary_search_inside', ctx);
+    // A page that would cross the window is fitted to it, as one clamp with one notice.
+    const limit = applyPaginationLimit(
+      input.limit,
+      Math.min(INSIDE_PAGE_CEILING, RESULT_WINDOW - input.offset),
+      'openlibrary_search_inside',
+      ctx,
+    );
     const result = await svc.searchInside(input.query, limit, input.offset, ctx);
-    const limitNotice = paginationLimitNotice(input.limit, input.offset, result.matches.length);
+    const limitNotice = paginationLimitNotice(
+      input.limit,
+      limit,
+      input.offset,
+      result.matches.length,
+      Math.min(result.total, RESULT_WINDOW),
+    );
+    // A shortened page that reaches the window's last row, with matches ranked past it, has no next page.
+    const windowNotice =
+      limit < input.limit && input.offset + limit >= RESULT_WINDOW && result.total > RESULT_WINDOW
+        ? "Open Library's full-text index serves only its first 10,000 results; narrow or quote the query to reach matches ranked below them."
+        : undefined;
 
     // Always the upstream match count, including on an empty page: an over-paged
     // request matched items, and reporting 0 would misdirect the correction.
@@ -118,9 +174,14 @@ export const openlibrarySearchInside = tool('openlibrary_search_inside', {
       result.matches.length > 0
         ? undefined
         : result.total > 0
-          ? `Offset ${result.offset} is past the end of the result set — ${result.total} items matched, so the last offset that returns a result is ${result.total - 1}. Retry with a lower offset; the query itself matched.`
-          : `No scanned book contains ${input.query}. An exact-phrase query only matches the wording as printed — drop the quotes to match the terms independently, or shorten the phrase.`;
-    const notice = composeNotices(limitNotice, emptyNotice);
+          ? pastEndNotice(
+              result.offset,
+              result.total,
+              `${result.total} items matched`,
+              'the query itself matched',
+            )
+          : `No scanned book contains ${escapeMarkdownInline(input.query)}. An exact-phrase query only matches the wording as printed — drop the quotes to match the terms independently, or shorten the phrase.`;
+    const notice = composeNotices(limitNotice, windowNotice, emptyNotice);
     if (notice) ctx.enrich.notice(notice);
 
     return { total: result.total, offset: result.offset, matches: result.matches };

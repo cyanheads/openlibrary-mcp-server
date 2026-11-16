@@ -13,6 +13,7 @@ import {
 } from '@/services/open-library/open-library-service.js';
 
 const FULL_EDITION = {
+  identifier: 'OL7353617M',
   edition_id: 'OL7353617M',
   title: 'The Great Gatsby',
   authors: [{ name: 'F. Scott Fitzgerald', author_id: 'OL24638A', source: 'edition' as const }],
@@ -34,6 +35,7 @@ const FULL_EDITION = {
 
 const SECOND_EDITION = {
   ...FULL_EDITION,
+  identifier: 'OL22855101M',
   edition_id: 'OL22855101M',
   title: 'Concorde',
   isbn_13: ['9782952690607'],
@@ -193,6 +195,48 @@ describe('openlibraryGetEdition', () => {
     expect(notice).toContain('author ID');
   });
 
+  // The notice names edition IDs, so its retry must say how to send them: an ISBN
+  // batch resubmitting those IDs under its own id_type gets invalid_identifier.
+  it('makes the author-gap retry one executable call for a non-OLID batch', async () => {
+    const svc = getOpenLibraryService();
+    const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
+    vi.spyOn(svc, 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [
+        { ...FULL_EDITION, identifier: '9780743273565' },
+        { ...SECOND_EDITION, identifier: '9782952690607' },
+      ],
+      unresolved: [],
+      authorGaps: { failed: ['OL7353617M'], skipped: ['OL22855101M'] },
+    });
+    await openlibraryGetEdition.handler(
+      openlibraryGetEdition.input.parse({
+        identifiers: ['9780743273565', '9782952690607'],
+        id_type: 'isbn',
+      }),
+      ctx,
+    );
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain(
+      'Call again later with id_type "olid" and just those edition IDs to fill in the authors.',
+    );
+
+    // Following it: the edition IDs the notice names, under id_type "olid", all reach upstream.
+    const named = [...notice.matchAll(/\bOL\d+M\b/g)].map((match) => match[0]);
+    expect(named).toEqual(['OL7353617M', 'OL22855101M']);
+    const retry = vi.spyOn(svc, 'getEditionsByIdentifiers').mockResolvedValueOnce({
+      editions: [FULL_EDITION, SECOND_EDITION],
+      unresolved: [],
+      authorGaps: NO_GAPS,
+    });
+    const retryCtx = createMockContext({ errors: openlibraryGetEdition.errors });
+    const retried = await openlibraryGetEdition.handler(
+      openlibraryGetEdition.input.parse({ identifiers: named, id_type: 'olid' }),
+      retryCtx,
+    );
+    expect(retry).toHaveBeenLastCalledWith(named, 'olid', retryCtx);
+    expect(retried.unresolved).toEqual([]);
+  });
+
   it('names only the failure when nothing was skipped', async () => {
     const ctx = createMockContext({ errors: openlibraryGetEdition.errors });
     vi.spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers').mockResolvedValueOnce({
@@ -237,7 +281,7 @@ describe('openlibraryGetEdition', () => {
     const spy = vi
       .spyOn(getOpenLibraryService(), 'getEditionsByIdentifiers')
       .mockResolvedValueOnce({
-        editions: identifiers.map((id) => ({ ...FULL_EDITION, edition_id: id })),
+        editions: identifiers.map((id) => ({ ...FULL_EDITION, identifier: id, edition_id: id })),
         unresolved: [],
         authorGaps: NO_GAPS,
       });
@@ -287,6 +331,8 @@ describe('openlibraryGetEdition', () => {
     expect(text).toContain('The Great Gatsby');
     expect(text).toContain('Concorde');
     expect(text).toContain('OL22855101M');
+    expect(text).toContain('## The Great Gatsby\n**Identifier:** OL7353617M\n');
+    expect(text).toContain('## Concorde\n**Identifier:** OL22855101M\n');
   });
 
   it('renders unresolved identifiers with their reason so a miss is visible in text', () => {
@@ -342,6 +388,7 @@ describe('openlibraryGetEdition', () => {
 
   it('formats sparse edition (no optional fields)', () => {
     const sparse = {
+      identifier: 'OL1M',
       edition_id: 'OL1M',
       title: 'Sparse Edition',
       authors: [],

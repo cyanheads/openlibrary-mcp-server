@@ -1,10 +1,12 @@
 /**
- * @fileoverview MARC language code normalization for Open Library's `language=`
- * search filter, which accepts 3-letter MARC codes only.
+ * @fileoverview Language code normalization for Open Library's `language=` search
+ * filter, which matches the 3-letter codes its language records carry (MARC codes,
+ * almost all) and silently matches nothing for any other value.
  * @module services/open-library/language-codes
  */
 
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { OPEN_LIBRARY_LANGUAGE_CODES } from './language-records.js';
 
 /**
  * ISO 639-1 (2-letter) → MARC (3-letter) language code aliases.
@@ -207,30 +209,70 @@ export const MARC_LANGUAGE_BY_ISO_639_1: Readonly<Record<string, string>> = {
 };
 
 /**
- * Resolves a caller-supplied language code to the 3-letter MARC code Open
- * Library's `language=` filter accepts.
+ * ISO 639-2 terminology (T) → bibliographic (B, the MARC form) codes, for the 20
+ * languages whose two forms differ — the complete set in the Library of Congress
+ * ISO 639-2 registry cited above. The T codes are also the ISO 639-3 codes most
+ * callers know, and none is an Open Library language record, so each matches
+ * nothing unmapped.
+ */
+export const MARC_LANGUAGE_BY_ISO_639_2T: Readonly<Record<string, string>> = {
+  bod: 'tib',
+  ces: 'cze',
+  cym: 'wel',
+  deu: 'ger',
+  ell: 'gre',
+  eus: 'baq',
+  fas: 'per',
+  fra: 'fre',
+  hye: 'arm',
+  isl: 'ice',
+  kat: 'geo',
+  mkd: 'mac',
+  mri: 'mao',
+  msa: 'may',
+  mya: 'bur',
+  nld: 'dut',
+  ron: 'rum',
+  slk: 'slo',
+  sqi: 'alb',
+  zho: 'chi',
+};
+
+/**
+ * The MARC Code List for Languages codes, current and obsolete, that Open Library has no
+ * language record for: `zxx` (no linguistic content) and the obsolete `ajm`, `kus`, `max`,
+ * and `tru`. No work is indexed under any of them, but each is a real MARC code, so the
+ * filter sends it and answers the accurate empty page.
+ */
+const MARC_CODES_WITHOUT_RECORD: ReadonlySet<string> = new Set(['ajm', 'kus', 'max', 'tru', 'zxx']);
+
+/**
+ * Resolves a caller-supplied language code, in any case, to the 3-letter code
+ * Open Library's `language=` filter indexes works under.
  *
- * A 3-letter code is taken as MARC and passed through lowercased. A 2-letter
- * code is looked up in {@link MARC_LANGUAGE_BY_ISO_639_1}; an unrecognized one
- * throws rather than silently reaching upstream, where an unmapped code filters
- * nothing and the caller is told a constraint applied that never did.
+ * A 2-letter code is looked up in {@link MARC_LANGUAGE_BY_ISO_639_1} and a 3-letter
+ * terminology code in {@link MARC_LANGUAGE_BY_ISO_639_2T}; any other 3-letter code
+ * must be an Open Library language record ({@link OPEN_LIBRARY_LANGUAGE_CODES}) or a
+ * MARC code ({@link MARC_CODES_WITHOUT_RECORD}). Anything else throws rather than
+ * reaching upstream, where a code that names no language filters to zero matches and
+ * the caller reads an empty catalog as a real result.
  *
  * @throws {McpError} ValidationError with `reason: 'unknown_language_code'` when
- * a 2-letter code has no MARC alias.
+ * the code is neither a MARC code nor an Open Library language record.
  */
 export function normalizeLanguageCode(code: string): string {
   const lower = code.trim().toLowerCase();
-  if (lower.length === 3) return lower;
-
-  const marc = MARC_LANGUAGE_BY_ISO_639_1[lower];
-  if (marc) return marc;
+  const mapped =
+    lower.length === 2 ? MARC_LANGUAGE_BY_ISO_639_1[lower] : MARC_LANGUAGE_BY_ISO_639_2T[lower];
+  if (mapped) return mapped;
+  if (OPEN_LIBRARY_LANGUAGE_CODES.has(lower) || MARC_CODES_WITHOUT_RECORD.has(lower)) return lower;
 
   throw validationError(
-    `"${code}" is not a recognized ISO 639-1 language code and has no MARC equivalent. Open Library filters by 3-letter MARC codes — pass one directly (e.g. "eng", "fre", "ger", "chi") or a 2-letter ISO 639-1 code that maps to one.`,
+    `"${code}" names no language Open Library catalogs works under. The filter takes a 3-letter MARC code (e.g. "eng", "fre", "ger", "chi"), the ISO 639-2/T form of one (e.g. "deu", "fra"), or a 2-letter ISO 639-1 code that maps to one (e.g. "de", "fr").`,
     {
       reason: 'unknown_language_code',
       recovery: {
-        hint: `Replace "${code}" with a 3-letter MARC language code (e.g. "eng", "fre", "ger", "spa", "chi"); the full list is the Library of Congress MARC Code List for Languages.`,
+        hint: `Replace "${code}" with a 3-letter MARC language code (e.g. "eng", "fre", "ger", "spa", "chi") or a 2-letter ISO 639-1 code (e.g. "en", "fr"); the Library of Congress MARC Code List for Languages names them.`,
       },
     },
   );
